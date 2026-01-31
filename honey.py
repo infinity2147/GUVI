@@ -27,8 +27,8 @@ import traceback
 
 import os
    
-API_KEY = os.getenv("API_KEY")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+API_KEY = os.getenv("API_KEY","api")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY","openai")
 GUVI_CALLBACK_URL = "https://hackathon.guvi.in/api/updateHoneyPotFinalResult"
 
 # Session management
