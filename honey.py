@@ -27,8 +27,8 @@ import traceback
 
 import os
    
-API_KEY = os.getenv("API_KEY", "your-secret-api-key-here")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "your-openai-key")
+API_KEY = os.getenv("API_KEY", "Xk7pQm9RvT2nL5wY8hJcA1bN4fG6dS3e")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "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")
 GUVI_CALLBACK_URL = "https://hackathon.guvi.in/api/updateHoneyPotFinalResult"
 
 # Session management
