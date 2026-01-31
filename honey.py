@@ -10,7 +10,7 @@ from fastapi import FastAPI, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
-import openai
+from openai import OpenAI
 import uvicorn
 import asyncio
 import re
@@ -233,7 +233,7 @@ class HoneypotAgent:
     """Advanced AI agent for scam engagement with Claude"""
     
     def __init__(self, api_key: str):
-        openai.api_key = api_key
+        self.client = OpenAI(api_key=api_key)
         
     def generate_persona(self, scam_type: str, metadata: Optional[ConversationMetadata]) -> str:
         """Generate appropriate persona based on scam type"""
@@ -304,21 +304,24 @@ Respond ONLY with the message text, nothing else."""
 
         try:
             # NEW (OpenAI GPT)
-            response = openai.ChatCompletion.create(
-                model="gpt-4o-mini",  # or "gpt-3.5-turbo" for cheaper option
-                max_tokens=150,
-                temperature=0.8,
+            response = self.client.chat.completions.create(
+                model="gpt-4o-mini",
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": "Generate the response now."}
-                ]
+                ],
+                max_tokens=150,
+                temperature=0.8,
             )
+
             reply = response.choices[0].message.content.strip()
+
                         
             # Post-process to ensure naturalness
             reply = self._add_human_touches(reply, engagement_stage)
             
-            return reply
+            return reply or "Okay… can you explain that again?"
+
             
         except Exception as e:
             print(f"Error generating response: {e}")
