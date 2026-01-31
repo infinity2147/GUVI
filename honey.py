@@ -514,7 +514,7 @@ async def honeypot_endpoint(
         
         # Initialize agent if not exists
         if session_id not in active_sessions:
-            active_sessions[session_id] = HoneypotAgent(openai_API_KEY)
+            active_sessions[session_id] = HoneypotAgent(OPENAI_API_KEY)
         
         agent = active_sessions[session_id]
         
