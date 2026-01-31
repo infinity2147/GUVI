@@ -50,9 +50,9 @@ session_intelligence = defaultdict(lambda: {
 # ============================================================================
 
 class Message(BaseModel):
-    sender: str
-    text: str
-    timestamp: str
+    sender: Optional[str] = "unknown"
+    text: Optional[str] = None
+    timestamp: Optional[str] = None
 
 class ConversationMetadata(BaseModel):
     channel: Optional[str] = "SMS"
@@ -60,10 +60,11 @@ class ConversationMetadata(BaseModel):
     locale: Optional[str] = "IN"
 
 class HoneypotRequest(BaseModel):
-    sessionId: str
-    message: Message
-    conversationHistory: List[Message] = []
+    sessionId: Optional[str] = "test-session"
+    message: Optional[Message] = None
+    conversationHistory: List[Message] = Field(default_factory=list)
     metadata: Optional[ConversationMetadata] = None
+
 
 class HoneypotResponse(BaseModel):
     status: str
@@ -261,8 +262,9 @@ class HoneypotAgent:
         
         # Build conversation context
         history_text = "\n".join([
-            f"{msg.sender}: {msg.text}" for msg in conversation_history[-5:]  # Last 5 messages
-        ])
+    f"{msg.sender or 'unknown'}: {msg.text or ''}" for msg in conversation_history[-5:]
+])
+
         
         # Progressive engagement strategy
         engagement_stage = self._determine_engagement_stage(message_count, scam_analysis)
@@ -502,9 +504,14 @@ async def honeypot_endpoint(
         raise HTTPException(status_code=401, detail="Invalid API key")
     
     try:
-        session_id = request.sessionId
+        session_id = request.sessionId or "test-session"
+        conversation_history = request.conversationHistory or []
+
+        if not request.message or not request.message.text:
+            raise HTTPException(status_code=400, detail="message.text is required")
+
         current_message = request.message.text
-        conversation_history = request.conversationHistory
+
         
         # Analyze current message for scam indicators
         scam_analysis = ScamDetector.analyze_message(current_message)
