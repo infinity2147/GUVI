@@ -24,7 +24,10 @@ import hashlib
 # CONFIGURATION
 # ============================================================================
 
-
+import os
+   
+API_KEY = os.getenv("API_KEY", "your-secret-api-key-here")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "your-openai-key")
 GUVI_CALLBACK_URL = "https://hackathon.guvi.in/api/updateHoneyPotFinalResult"
 
 # Session management
