@@ -19,6 +19,7 @@ from datetime import datetime
 import requests
 from collections import defaultdict
 import hashlib
+import traceback
 
 # ============================================================================
 # CONFIGURATION
@@ -143,6 +144,17 @@ class ScamDetector:
     @staticmethod
     def analyze_message(text: str) -> Dict[str, Any]:
         """Comprehensive scam analysis"""
+        if not text or not isinstance(text, str):
+            return {
+                'scam_score': 0,
+                'is_scam': False,
+                'scam_type': None,
+                'urgency_score': 0,
+                'threat_score': 0,
+                'request_score': 0,
+                'suspicious_keywords': []
+            }
+            
         text_lower = text.lower()
         
         # Pattern matching scores
@@ -195,6 +207,9 @@ class ScamDetector:
             'phoneNumbers': []
         }
         
+        if not text or not isinstance(text, str):
+            return intelligence
+        
         # Extract bank account numbers (various formats)
         bank_patterns = [
             r'\b\d{9,18}\b',  # 9-18 digit account numbers
@@ -230,7 +245,7 @@ class ScamDetector:
 # ============================================================================
 
 class HoneypotAgent:
-    """Advanced AI agent for scam engagement with Claude"""
+    """Advanced AI agent for scam engagement with OpenAI"""
     
     def __init__(self, api_key: str):
         self.client = OpenAI(api_key=api_key)
@@ -257,21 +272,22 @@ class HoneypotAgent:
     ) -> str:
         """Generate human-like response to engage scammer"""
         
-        scam_type = scam_analysis.get('scam_type', 'unknown')
-        persona = self.generate_persona(scam_type, metadata)
-        message_count = len(conversation_history) + 1
-        
-        # Build conversation context
-        history_text = "\n".join([
-    f"{msg.sender or 'unknown'}: {msg.text or ''}" for msg in conversation_history[-5:]
-])
-
-        
-        # Progressive engagement strategy
-        engagement_stage = self._determine_engagement_stage(message_count, scam_analysis)
-        
-        # Create prompt for Claude
-        system_prompt = f"""You are an AI agent operating a honeypot to detect and extract intelligence from scammers.
+        try:
+            scam_type = scam_analysis.get('scam_type', 'unknown')
+            persona = self.generate_persona(scam_type, metadata)
+            message_count = len(conversation_history) + 1
+            
+            # Build conversation context
+            history_text = "\n".join([
+                f"{msg.sender or 'unknown'}: {msg.text or ''}" 
+                for msg in conversation_history[-5:] if msg.text
+            ])
+            
+            # Progressive engagement strategy
+            engagement_stage = self._determine_engagement_stage(message_count, scam_analysis)
+            
+            # Create prompt for OpenAI
+            system_prompt = f"""You are an AI agent operating a honeypot to detect and extract intelligence from scammers.
 
 PERSONA: You are playing the role of a {persona}.
 
@@ -302,8 +318,6 @@ Generate a response that:
 
 Respond ONLY with the message text, nothing else."""
 
-        try:
-            # NEW (OpenAI GPT)
             response = self.client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
@@ -315,18 +329,20 @@ Respond ONLY with the message text, nothing else."""
             )
 
             reply = response.choices[0].message.content.strip()
-
-                        
+            
             # Post-process to ensure naturalness
             reply = self._add_human_touches(reply, engagement_stage)
             
-            return reply or "Okay… can you explain that again?"
-
+            return reply if reply else "Okay… can you explain that again?"
             
         except Exception as e:
-            print(f"Error generating response: {e}")
-            # Fallback responses
-            return self._get_fallback_response(engagement_stage, scam_type)
+            print(f"Error in agent.engage: {e}")
+            traceback.print_exc()
+            # Return fallback response
+            return self._get_fallback_response(
+                self._determine_engagement_stage(len(conversation_history) + 1, scam_analysis),
+                scam_analysis.get('scam_type', 'unknown')
+            )
     
     def _determine_engagement_stage(self, message_count: int, scam_analysis: Dict) -> str:
         """Determine current engagement stage"""
@@ -355,6 +371,9 @@ Respond ONLY with the message text, nothing else."""
     def _add_human_touches(self, text: str, stage: str) -> str:
         """Add human-like imperfections"""
         import random
+        
+        if not text:
+            return text
         
         # Occasionally add typos or informal language
         if random.random() < 0.3 and stage in ["initial_confusion", "cautious_interest"]:
@@ -415,72 +434,79 @@ Respond ONLY with the message text, nothing else."""
 
 def update_session_intelligence(session_id: str, message: str, scam_analysis: Dict):
     """Update intelligence gathered for this session"""
-    intel = session_intelligence[session_id]
-    
-    # Extract and add intelligence
-    extracted = ScamDetector.extract_intelligence(message)
-    intel['bankAccounts'].update(extracted['bankAccounts'])
-    intel['upiIds'].update(extracted['upiIds'])
-    intel['phishingLinks'].update(extracted['phishingLinks'])
-    intel['phoneNumbers'].update(extracted['phoneNumbers'])
-    intel['suspiciousKeywords'].update(scam_analysis.get('suspicious_keywords', []))
-    
-    # Update metadata
-    intel['messageCount'] += 1
-    intel['scamScore'] = max(intel['scamScore'], scam_analysis['scam_score'])
-    if scam_analysis.get('scam_type'):
-        intel['scamType'] = scam_analysis['scam_type']
-    
-    # Track tactics
-    if scam_analysis.get('urgency_score', 0) > 0:
-        intel['tactics'].add('urgency_tactics')
-    if scam_analysis.get('threat_score', 0) > 0:
-        intel['tactics'].add('threat_based')
-    if scam_analysis.get('request_score', 0) > 0:
-        intel['tactics'].add('information_request')
+    try:
+        intel = session_intelligence[session_id]
+        
+        # Extract and add intelligence
+        extracted = ScamDetector.extract_intelligence(message)
+        intel['bankAccounts'].update(extracted['bankAccounts'])
+        intel['upiIds'].update(extracted['upiIds'])
+        intel['phishingLinks'].update(extracted['phishingLinks'])
+        intel['phoneNumbers'].update(extracted['phoneNumbers'])
+        intel['suspiciousKeywords'].update(scam_analysis.get('suspicious_keywords', []))
+        
+        # Update metadata
+        intel['messageCount'] += 1
+        intel['scamScore'] = max(intel['scamScore'], scam_analysis.get('scam_score', 0))
+        if scam_analysis.get('scam_type'):
+            intel['scamType'] = scam_analysis['scam_type']
+        
+        # Track tactics
+        if scam_analysis.get('urgency_score', 0) > 0:
+            intel['tactics'].add('urgency_tactics')
+        if scam_analysis.get('threat_score', 0) > 0:
+            intel['tactics'].add('threat_based')
+        if scam_analysis.get('request_score', 0) > 0:
+            intel['tactics'].add('information_request')
+    except Exception as e:
+        print(f"Error updating session intelligence: {e}")
 
 def should_terminate_session(session_id: str) -> bool:
     """Determine if session should be terminated and reported"""
-    intel = session_intelligence[session_id]
-    
-    # Terminate conditions
-    if intel['messageCount'] >= 20:  # Max engagement
-        return True
-    if intel['scamScore'] >= 80 and intel['messageCount'] >= 5:  # High confidence + enough data
-        return True
-    if len(intel['bankAccounts']) > 0 or len(intel['upiIds']) > 0:  # Critical intel obtained
-        return True
-    
-    return False
+    try:
+        intel = session_intelligence[session_id]
+        
+        # Terminate conditions
+        if intel['messageCount'] >= 20:  # Max engagement
+            return True
+        if intel['scamScore'] >= 80 and intel['messageCount'] >= 5:  # High confidence + enough data
+            return True
+        if len(intel['bankAccounts']) > 0 or len(intel['upiIds']) > 0:  # Critical intel obtained
+            return True
+        
+        return False
+    except Exception as e:
+        print(f"Error checking session termination: {e}")
+        return False
 
 async def send_final_callback(session_id: str):
     """Send final intelligence to GUVI evaluation endpoint"""
-    intel = session_intelligence[session_id]
-    
-    # Build agent notes
-    notes_parts = []
-    if intel['scamType']:
-        notes_parts.append(f"Scam type: {intel['scamType']}")
-    if intel['tactics']:
-        notes_parts.append(f"Tactics: {', '.join(intel['tactics'])}")
-    notes_parts.extend(intel['agentNotes'])
-    agent_notes = ". ".join(notes_parts)
-    
-    payload = {
-        "sessionId": session_id,
-        "scamDetected": True,
-        "totalMessagesExchanged": intel['messageCount'],
-        "extractedIntelligence": {
-            "bankAccounts": list(intel['bankAccounts']),
-            "upiIds": list(intel['upiIds']),
-            "phishingLinks": list(intel['phishingLinks']),
-            "phoneNumbers": list(intel['phoneNumbers']),
-            "suspiciousKeywords": list(intel['suspiciousKeywords'])
-        },
-        "agentNotes": agent_notes or "Scam engagement completed successfully"
-    }
-    
     try:
+        intel = session_intelligence[session_id]
+        
+        # Build agent notes
+        notes_parts = []
+        if intel['scamType']:
+            notes_parts.append(f"Scam type: {intel['scamType']}")
+        if intel['tactics']:
+            notes_parts.append(f"Tactics: {', '.join(intel['tactics'])}")
+        notes_parts.extend(intel['agentNotes'])
+        agent_notes = ". ".join(notes_parts)
+        
+        payload = {
+            "sessionId": session_id,
+            "scamDetected": True,
+            "totalMessagesExchanged": intel['messageCount'],
+            "extractedIntelligence": {
+                "bankAccounts": list(intel['bankAccounts']),
+                "upiIds": list(intel['upiIds']),
+                "phishingLinks": list(intel['phishingLinks']),
+                "phoneNumbers": list(intel['phoneNumbers']),
+                "suspiciousKeywords": list(intel['suspiciousKeywords'])
+            },
+            "agentNotes": agent_notes or "Scam engagement completed successfully"
+        }
+        
         response = requests.post(
             GUVI_CALLBACK_URL,
             json=payload,
@@ -490,8 +516,8 @@ async def send_final_callback(session_id: str):
         return response.status_code == 200
     except Exception as e:
         print(f"✗ Callback failed for session {session_id}: {e}")
-        return True  # prevent failure from bubbling
-
+        traceback.print_exc()
+        return True
 
 # ============================================================================
 # API ENDPOINTS
@@ -509,28 +535,40 @@ async def honeypot_endpoint(
         raise HTTPException(status_code=401, detail="Invalid API key")
     
     try:
-        session_id = request.sessionId or "test-session"
+        # Extract session ID with fallback
+        session_id = request.sessionId or f"session-{datetime.utcnow().timestamp()}"
+
+        # Normalize message safely - CRITICAL FIX
+        current_message = ""
+        if isinstance(request.message, str):
+            current_message = request.message.strip()
+        elif isinstance(request.message, dict):
+            # Try multiple keys
+            current_message = (
+                request.message.get("text") or 
+                request.message.get("message") or 
+                request.message.get("content") or 
+                ""
+            ).strip()
+        
+        if not current_message:
+            return HoneypotResponse(
+                status="error",
+                reply="I didn't receive any message. Could you please try again?"
+            )
 
         # Normalize conversation history safely
         conversation_history = []
         if isinstance(request.conversationHistory, list):
             for msg in request.conversationHistory:
-                if isinstance(msg, dict):
-                    conversation_history.append(Message(**msg))
-
-        # Normalize message safely
-        if isinstance(request.message, str):
-            current_message = request.message
-        elif isinstance(request.message, dict):
-            current_message = request.message.get("text") or request.message.get("message") or ""
-        else:
-            current_message = ""
-
-        if not current_message:
-            raise HTTPException(status_code=400, detail="Message text required")
-
-
-
+                try:
+                    if isinstance(msg, dict):
+                        conversation_history.append(Message(**msg))
+                    elif hasattr(msg, 'text'):
+                        conversation_history.append(msg)
+                except Exception as msg_err:
+                    print(f"Warning: Could not parse message in history: {msg_err}")
+                    continue
         
         # Analyze current message for scam indicators
         scam_analysis = ScamDetector.analyze_message(current_message)
@@ -562,11 +600,8 @@ async def honeypot_endpoint(
                 session_intelligence[session_id]['agentNotes'].append(
                     f"Session terminated after {session_intelligence[session_id]['messageCount']} messages"
                 )
-                try:
-                    asyncio.create_task(send_final_callback(session_id))
-                except Exception as cb_err:
-                    print(f"Callback scheduling failed: {cb_err}")
-
+                # Schedule callback without blocking
+                asyncio.create_task(send_final_callback(session_id))
             
             return HoneypotResponse(status="success", reply=reply)
         
@@ -577,9 +612,16 @@ async def honeypot_endpoint(
                 reply="I'm sorry, I don't understand. Who is this?"
             )
     
+    except HTTPException:
+        raise
     except Exception as e:
-        print(f"Error processing request: {e}")
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+        print(f"ERROR in honeypot_endpoint: {e}")
+        traceback.print_exc()
+        # Return a safe fallback instead of crashing
+        return HoneypotResponse(
+            status="error",
+            reply="I'm having trouble understanding. Could you repeat that?"
+        )
 
 @app.get("/health")
 async def health_check():
