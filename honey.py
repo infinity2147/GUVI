@@ -59,11 +59,14 @@ class ConversationMetadata(BaseModel):
     language: Optional[str] = "English"
     locale: Optional[str] = "IN"
 
+from typing import Union
+
 class HoneypotRequest(BaseModel):
     sessionId: Optional[str] = "test-session"
-    message: Optional[Message] = None
+    message: Optional[Union[str, Message]] = None
     conversationHistory: List[Message] = Field(default_factory=list)
     metadata: Optional[ConversationMetadata] = None
+
 
 
 class HoneypotResponse(BaseModel):
@@ -507,10 +510,14 @@ async def honeypot_endpoint(
         session_id = request.sessionId or "test-session"
         conversation_history = request.conversationHistory or []
 
-        if not request.message or not request.message.text:
-            raise HTTPException(status_code=400, detail="message.text is required")
+        # Accept both string and object message formats
+        if isinstance(request.message, str):
+            current_message = request.message
+        elif isinstance(request.message, Message) and request.message.text:
+            current_message = request.message.text
+        else:
+            raise HTTPException(status_code=400, detail="Valid message text required")
 
-        current_message = request.message.text
 
         
         # Analyze current message for scam indicators
