@@ -88,6 +88,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"]
 )
 
 # ============================================================================
@@ -523,6 +524,11 @@ async def send_final_callback(session_id: str):
 # API ENDPOINTS
 # ============================================================================
 
+@app.options("/honeypot")
+async def honeypot_options():
+    """Handle CORS preflight requests"""
+    return {"status": "ok"}
+
 @app.post("/honeypot", response_model=HoneypotResponse)
 async def honeypot_endpoint(
     request: HoneypotRequest,
@@ -642,8 +648,19 @@ async def root():
         "endpoints": {
             "honeypot": "/honeypot (POST)",
             "health": "/health (GET)",
+            "test": "/test (GET)",
             "docs": "/docs"
         }
+    }
+
+@app.get("/test")
+async def test_endpoint():
+    """Simple test endpoint to verify service is accessible"""
+    return {
+        "status": "success",
+        "message": "Honeypot API is accessible",
+        "timestamp": datetime.utcnow().isoformat(),
+        "cors_enabled": True
     }
 
 # ============================================================================
