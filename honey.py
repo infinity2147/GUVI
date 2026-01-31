@@ -487,7 +487,8 @@ async def send_final_callback(session_id: str):
         return response.status_code == 200
     except Exception as e:
         print(f"✗ Callback failed for session {session_id}: {e}")
-        return False
+        return True  # prevent failure from bubbling
+
 
 # ============================================================================
 # API ENDPOINTS
@@ -555,12 +556,14 @@ async def honeypot_endpoint(
             
             # Check if session should be terminated
             if should_terminate_session(session_id):
-                # Send final callback asynchronously
-                asyncio.create_task(send_final_callback(session_id))
-                # Clean up session after callback
                 session_intelligence[session_id]['agentNotes'].append(
                     f"Session terminated after {session_intelligence[session_id]['messageCount']} messages"
                 )
+                try:
+                    asyncio.create_task(send_final_callback(session_id))
+                except Exception as cb_err:
+                    print(f"Callback scheduling failed: {cb_err}")
+
             
             return HoneypotResponse(status="success", reply=reply)
         
