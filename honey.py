@@ -59,15 +59,13 @@ class ConversationMetadata(BaseModel):
     language: Optional[str] = "English"
     locale: Optional[str] = "IN"
 
-from typing import Union
+from typing import Any, Union
 
 class HoneypotRequest(BaseModel):
-    sessionId: Optional[str] = "test-session"
-    message: Optional[Union[str, Message]] = None
-    conversationHistory: List[Message] = Field(default_factory=list)
-    metadata: Optional[ConversationMetadata] = None
-
-
+    sessionId: Optional[str] = None
+    message: Optional[Union[str, Dict[str, Any]]] = None
+    conversationHistory: Optional[Any] = None
+    metadata: Optional[Any] = None
 
 class HoneypotResponse(BaseModel):
     status: str
@@ -508,15 +506,25 @@ async def honeypot_endpoint(
     
     try:
         session_id = request.sessionId or "test-session"
-        conversation_history = request.conversationHistory or []
 
-        # Accept both string and object message formats
+        # Normalize conversation history safely
+        conversation_history = []
+        if isinstance(request.conversationHistory, list):
+            for msg in request.conversationHistory:
+                if isinstance(msg, dict):
+                    conversation_history.append(Message(**msg))
+
+        # Normalize message safely
         if isinstance(request.message, str):
             current_message = request.message
-        elif isinstance(request.message, Message) and request.message.text:
-            current_message = request.message.text
+        elif isinstance(request.message, dict):
+            current_message = request.message.get("text") or request.message.get("message") or ""
         else:
-            raise HTTPException(status_code=400, detail="Valid message text required")
+            current_message = ""
+
+        if not current_message:
+            raise HTTPException(status_code=400, detail="Message text required")
+
 
 
         
