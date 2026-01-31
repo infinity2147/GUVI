@@ -304,7 +304,7 @@ Respond ONLY with the message text, nothing else."""
         try:
             # NEW (OpenAI GPT)
             response = openai.ChatCompletion.create(
-                model="gpt-4",  # or "gpt-3.5-turbo" for cheaper option
+                model="gpt-4o-mini",  # or "gpt-3.5-turbo" for cheaper option
                 max_tokens=150,
                 temperature=0.8,
                 messages=[
