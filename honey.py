@@ -1,10 +1,13 @@
 """
 Agentic Honey-Pot for Scam Detection & Intelligence Extraction
-Advanced AI-Powered Scam Detection System with Multi-Agent Architecture
+PRODUCTION VERSION - Anti-Detection Enhanced
 
-REFACTORED VERSION - Production Ready
+Advanced AI-Powered Scam Detection System with Multi-Agent Architecture
+Designed to be indistinguishable from real victims
+
 Author: Team Innovation
 Hackathon: India AI Impact Buildathon
+Version: 4.0.0 (Production Ready)
 """
 
 from fastapi import FastAPI, HTTPException, Header, Request
@@ -29,6 +32,8 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 import tiktoken
+import random
+import time
 
 # ============================================================================
 # LOGGING CONFIGURATION
@@ -62,9 +67,10 @@ MAX_MESSAGE_LENGTH = 5000
 MAX_CONVERSATION_HISTORY = 50
 SESSION_TIMEOUT_HOURS = 24
 MAX_SESSIONS_PER_IP = 10
-MAX_MESSAGES_PER_SESSION = 20
+MAX_MESSAGES_PER_SESSION = 25  # Increased to extract more intelligence
 SCAM_DETECTION_THRESHOLD = 30
 HIGH_CONFIDENCE_THRESHOLD = 80
+MIN_INTELLIGENCE_THRESHOLD = 8  # Minimum messages before considering termination
 
 # ============================================================================
 # ENUMS
@@ -77,6 +83,7 @@ class EngagementStage(Enum):
     BUILDING_TRUST = "building_trust"
     INFORMATION_EXTRACTION = "information_extraction"
     FINAL_PUSH = "final_push"
+    PANIC_COMPLIANCE = "panic_compliance"  # New: When urgency is high
 
 class ScamType(Enum):
     """Types of scams detected"""
@@ -86,6 +93,8 @@ class ScamType(Enum):
     LOTTERY = "lottery"
     IMPERSONATION = "impersonation"
     OTP_FRAUD = "otp_fraud"
+    TECH_SUPPORT = "tech_support"
+    INVESTMENT = "investment"
     UNKNOWN = "unknown"
 
 # ============================================================================
@@ -93,12 +102,13 @@ class ScamType(Enum):
 # ============================================================================
 
 class SessionData:
-    """Thread-safe session data structure"""
+    """Thread-safe session data structure with enhanced tracking"""
     def __init__(self):
         self.bank_accounts = set()
         self.upi_ids = set()
         self.phishing_links = set()
         self.phone_numbers = set()
+        self.email_addresses = set()
         self.suspicious_keywords = set()
         self.message_count = 0
         self.scam_score = 0.0
@@ -107,7 +117,12 @@ class SessionData:
         self.agent_notes = []
         self.created_at = datetime.utcnow()
         self.last_activity = datetime.utcnow()
+        self.response_history = []  # Track responses to avoid repetition
+        self.extracted_entities = []  # Track what we've asked about
         self.lock = threading.Lock()
+        self.urgency_level = 0  # Track scammer's urgency
+        self.threat_level = 0  # Track threat/pressure
+        self.intelligence_score = 0  # Score based on intel extracted
 
     def update_activity(self):
         """Update last activity timestamp"""
@@ -125,12 +140,52 @@ class SessionData:
             self.scam_score = max(self.scam_score, score)
 
     def add_intelligence(self, intel: Dict[str, List[str]]):
-        """Thread-safe intelligence addition"""
+        """Thread-safe intelligence addition with scoring"""
         with self.lock:
+            before_count = (len(self.bank_accounts) + len(self.upi_ids) + 
+                          len(self.phone_numbers) + len(self.phishing_links))
+            
             self.bank_accounts.update(intel.get('bankAccounts', []))
             self.upi_ids.update(intel.get('upiIds', []))
             self.phishing_links.update(intel.get('phishingLinks', []))
             self.phone_numbers.update(intel.get('phoneNumbers', []))
+            self.email_addresses.update(intel.get('emailAddresses', []))
+            
+            after_count = (len(self.bank_accounts) + len(self.upi_ids) + 
+                         len(self.phone_numbers) + len(self.phishing_links))
+            
+            # Calculate intelligence score
+            self.intelligence_score = (
+                len(self.bank_accounts) * 10 +
+                len(self.upi_ids) * 8 +
+                len(self.phone_numbers) * 5 +
+                len(self.phishing_links) * 7 +
+                len(self.email_addresses) * 5
+            )
+
+    def add_response_to_history(self, response: str):
+        """Track responses to prevent repetition"""
+        with self.lock:
+            # Keep last 5 responses
+            self.response_history.append(response.lower())
+            if len(self.response_history) > 5:
+                self.response_history.pop(0)
+
+    def is_response_repetitive(self, response: str) -> bool:
+        """Check if response is too similar to recent ones"""
+        with self.lock:
+            response_lower = response.lower()
+            for prev_response in self.response_history[-3:]:
+                # Check for similar patterns
+                common_words = set(response_lower.split()) & set(prev_response.split())
+                if len(common_words) > 5:  # Too many common words
+                    return True
+                # Check for repeated question patterns
+                if "why are you" in response_lower and "why are you" in prev_response:
+                    return True
+                if "what is this" in response_lower and "what is this" in prev_response:
+                    return True
+        return False
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization"""
@@ -140,12 +195,14 @@ class SessionData:
                 'upiIds': list(self.upi_ids),
                 'phishingLinks': list(self.phishing_links),
                 'phoneNumbers': list(self.phone_numbers),
+                'emailAddresses': list(self.email_addresses),
                 'suspiciousKeywords': list(self.suspicious_keywords),
                 'messageCount': self.message_count,
                 'scamScore': self.scam_score,
                 'scamType': self.scam_type,
                 'tactics': list(self.tactics),
-                'agentNotes': self.agent_notes.copy()
+                'agentNotes': self.agent_notes.copy(),
+                'intelligenceScore': self.intelligence_score
             }
 
 # Global session storage
@@ -206,7 +263,6 @@ def count_tokens(text: str, model: str = "gpt-4o-mini") -> int:
         return len(encoding.encode(text))
     except Exception as e:
         logger.warning(f"Token counting failed: {e}")
-        # Rough estimate: 1 token ≈ 4 characters
         return len(text) // 4
 
 def truncate_conversation_history(
@@ -221,7 +277,6 @@ def truncate_conversation_history(
     total_tokens = 0
     truncated = []
     
-    # Keep most recent messages
     for msg in reversed(messages):
         msg_tokens = count_tokens(msg.text, model)
         if total_tokens + msg_tokens > max_tokens:
@@ -233,9 +288,8 @@ def truncate_conversation_history(
 
 def sanitize_for_logging(text: str, max_length: int = 100) -> str:
     """Sanitize sensitive data for logging"""
-    # Redact potential sensitive information
     text = re.sub(r'\b\d{9,18}\b', '[ACCOUNT_REDACTED]', text)
-    text = re.sub(r'\b[\w\.-]+@[\w\.-]+\b', '[UPI_REDACTED]', text)
+    text = re.sub(r'\b[\w\.-]+@[\w\.-]+\b', '[EMAIL_REDACTED]', text)
     text = re.sub(r'\b[6-9]\d{9}\b', '[PHONE_REDACTED]', text)
     
     if len(text) > max_length:
@@ -250,48 +304,53 @@ def sanitize_for_logging(text: str, max_length: int = 100) -> str:
 class ScamDetector:
     """Advanced scam detection with improved pattern matching"""
     
-    # Comprehensive scam patterns (from original code)
     URGENCY_PATTERNS = [
-        r'\b(urgent|immediately|now|today|asap|hurry|quick|fast)\b',
-        r'\b(expire|expiring|expired|deadline|limited time)\b',
-        r'\b(last chance|final notice|act now)\b'
+        r'\b(urgent|immediately|now|today|asap|hurry|quick|fast|right now|at once)\b',
+        r'\b(expire|expiring|expired|deadline|limited time|last chance)\b',
+        r'\b(within.*(?:minutes|hours)|in.*(?:minutes|hours))\b',
+        r'\b(final notice|last warning|act now)\b'
     ]
     
     THREAT_PATTERNS = [
-        r'\b(block|blocked|suspend|suspended|deactivate|terminate|close)\b',
+        r'\b(block|blocked|suspend|suspended|deactivate|terminate|close|freeze|locked)\b',
         r'\b(account|card|service|access).*\b(will be|has been|is being)\b',
-        r'\b(legal action|arrest|police|court|fine|penalty)\b',
-        r'\b(unauthorized|suspicious|fraudulent) (activity|transaction|login)\b'
+        r'\b(legal action|arrest|police|court|fine|penalty|charges)\b',
+        r'\b(unauthorized|suspicious|fraudulent) (activity|transaction|login|access)\b',
+        r'\b(permanently|forever|cannot be recovered)\b'
     ]
     
     REQUEST_PATTERNS = [
-        r'\b(verify|confirm|update|validate|authenticate)\b.*\b(account|details|information)\b',
-        r'\b(share|provide|send|give).*\b(otp|pin|password|cvv|code)\b',
-        r'\b(click|tap|visit|go to).*\b(link|url|website)\b',
-        r'\b(upi|bank|card|account).*\b(number|id|details)\b'
+        r'\b(verify|confirm|update|validate|authenticate|provide|share|send)\b.*\b(account|details|information|credentials)\b',
+        r'\b(share|provide|send|give|tell|disclose).*\b(otp|pin|password|cvv|code|number)\b',
+        r'\b(click|tap|visit|go to|open).*\b(link|url|website|portal)\b',
+        r'\b(upi|bank|card|account|debit|credit).*\b(number|id|details|pin)\b',
+        r'\b(download|install|setup).*\b(app|application|software)\b'
     ]
     
     REWARD_PATTERNS = [
-        r'\b(won|win|winner|prize|reward|gift|lottery)\b',
-        r'\b(congratulations|selected|eligible)\b',
-        r'\b(free|cashback|discount|offer|deal)\b.*\b(\d+%|\$|\₹)\b',
-        r'\b(claim|redeem|collect).*\b(prize|reward|money|cash)\b'
+        r'\b(won|win|winner|prize|reward|gift|lottery|jackpot)\b',
+        r'\b(congratulations|selected|eligible|chosen|lucky)\b',
+        r'\b(free|cashback|discount|offer|deal).*\b(\d+%|\$|\₹|rs)\b',
+        r'\b(claim|redeem|collect|receive).*\b(prize|reward|money|cash|amount)\b'
     ]
     
     IMPERSONATION_PATTERNS = [
-        r'\b(bank|sbi|hdfc|icici|axis|kotak|pnb|canara)\b',
-        r'\b(paytm|phonepe|googlepay|bhim|amazon|flipkart)\b',
-        r'\b(government|income tax|gst|aadhaar|pan)\b',
-        r'\b(customer care|support|helpline|service)\b'
+        r'\b(bank|sbi|hdfc|icici|axis|kotak|pnb|canara|bob|idbi)\b',
+        r'\b(paytm|phonepe|googlepay|gpay|bhim|amazon|flipkart)\b',
+        r'\b(government|income tax|gst|aadhaar|aadhar|pan|ministry)\b',
+        r'\b(customer care|support|helpline|service|executive|officer|representative)\b',
+        r'\b(rbi|reserve bank|sebi|cyber cell|police)\b'
     ]
     
     SCAM_KEYWORDS = {
-        ScamType.BANK_FRAUD: ['account', 'bank', 'card', 'kyc', 'verify', 'blocked'],
-        ScamType.UPI_FRAUD: ['upi', 'payment', 'transfer', 'wallet', 'paytm', 'phonepe'],
-        ScamType.PHISHING: ['link', 'click', 'url', 'website', 'portal', 'login'],
-        ScamType.LOTTERY: ['won', 'prize', 'lottery', 'lucky', 'selected', 'winner'],
-        ScamType.IMPERSONATION: ['officer', 'government', 'tax', 'police', 'authority'],
-        ScamType.OTP_FRAUD: ['otp', 'code', 'pin', 'verification', 'authenticate']
+        ScamType.BANK_FRAUD: ['account', 'bank', 'card', 'kyc', 'verify', 'blocked', 'suspended'],
+        ScamType.UPI_FRAUD: ['upi', 'payment', 'transfer', 'wallet', 'paytm', 'phonepe', 'refund'],
+        ScamType.PHISHING: ['link', 'click', 'url', 'website', 'portal', 'login', 'update'],
+        ScamType.LOTTERY: ['won', 'prize', 'lottery', 'lucky', 'selected', 'winner', 'reward'],
+        ScamType.IMPERSONATION: ['officer', 'government', 'tax', 'police', 'authority', 'official'],
+        ScamType.OTP_FRAUD: ['otp', 'code', 'pin', 'verification', 'authenticate', 'cvv'],
+        ScamType.TECH_SUPPORT: ['computer', 'virus', 'infected', 'software', 'technician', 'remote'],
+        ScamType.INVESTMENT: ['investment', 'trading', 'profit', 'returns', 'stock', 'crypto']
     }
     
     @staticmethod
@@ -362,98 +421,272 @@ class ScamDetector:
             'bankAccounts': [],
             'upiIds': [],
             'phishingLinks': [],
-            'phoneNumbers': []
+            'phoneNumbers': [],
+            'emailAddresses': []
         }
         
         if not text or not isinstance(text, str):
             return intelligence
         
         try:
-            # Extract bank account numbers
+            # Extract bank account numbers (various formats)
             bank_patterns = [
                 r'\b\d{9,18}\b',
                 r'\b[A-Z]{4}\d{7,16}\b',
+                r'\bA/C\s*:?\s*\d{9,18}\b',
+                r'\baccount\s*:?\s*\d{9,18}\b'
             ]
             for pattern in bank_patterns:
-                matches = re.findall(pattern, text)
+                matches = re.findall(pattern, text, re.IGNORECASE)
                 intelligence['bankAccounts'].extend(matches)
             
-            # Extract UPI IDs (more specific pattern)
-            upi_pattern = r'\b[\w\.-]+@(?:paytm|phonepe|ybl|oksbi|okhdfcbank|okicici|okaxis)\b'
+            # Extract UPI IDs
+            upi_pattern = r'\b[\w\.-]+@(?:paytm|phonepe|ybl|oksbi|okhdfcbank|okicici|okaxis|axl|ibl|pnb|boi|cbi)\b'
             intelligence['upiIds'] = re.findall(upi_pattern, text, re.IGNORECASE)
             
             # Extract URLs/links
-            url_pattern = r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+'
-            short_url_pattern = r'\b(?:bit\.ly|tinyurl\.com|goo\.gl|t\.co)/[\w]+'
-            intelligence['phishingLinks'] = re.findall(url_pattern, text) + re.findall(short_url_pattern, text)
+            url_patterns = [
+                r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+',
+                r'\b(?:bit\.ly|tinyurl\.com|goo\.gl|t\.co|short\.link)/[\w]+',
+                r'\b(?:www\.)?[\w-]+\.(?:com|in|org|net|info)/[\w/]*'
+            ]
+            for pattern in url_patterns:
+                matches = re.findall(pattern, text, re.IGNORECASE)
+                intelligence['phishingLinks'].extend(matches)
             
-            # Extract phone numbers (Indian format)
+            # Extract phone numbers (Indian format + international)
             phone_patterns = [
                 r'\+91[\s-]?\d{10}',
                 r'\b[6-9]\d{9}\b',
-                r'\b0\d{2,4}[\s-]?\d{6,8}\b'
+                r'\b0\d{2,4}[\s-]?\d{6,8}\b',
+                r'\+\d{1,3}[\s-]?\d{8,12}'
             ]
             for pattern in phone_patterns:
                 matches = re.findall(pattern, text)
                 intelligence['phoneNumbers'].extend(matches)
+            
+            # Extract email addresses
+            email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
+            intelligence['emailAddresses'] = re.findall(email_pattern, text)
+            
+            # Deduplicate
+            for key in intelligence:
+                intelligence[key] = list(set(intelligence[key]))
+                
         except Exception as e:
             logger.error(f"Error extracting intelligence: {e}")
         
         return intelligence
 
 # ============================================================================
-# AI AGENT SYSTEM (ENHANCED WITH OPENAI BEST PRACTICES)
+# AI AGENT SYSTEM (PRODUCTION-READY WITH ANTI-DETECTION)
 # ============================================================================
 
 class HoneypotAgent:
-    """Enhanced AI agent with proper OpenAI usage"""
+    """Production AI agent designed to be indistinguishable from real victims"""
     
     def __init__(self, api_key: str):
         self.client = AsyncOpenAI(api_key=api_key)
         self.model = "gpt-4o-mini"
         self.response_cache = {}
     
-    def get_cache_key(self, scam_type: ScamType, stage: EngagementStage, message_hash: str) -> str:
-        """Generate cache key for response caching"""
-        return hashlib.md5(
-            f"{scam_type.value}_{stage.value}_{message_hash[:8]}".encode()
-        ).hexdigest()
-    
-    def generate_persona(self, scam_type: ScamType) -> str:
-        """Generate appropriate persona based on scam type"""
+    def generate_persona(self, scam_type: ScamType, urgency_level: int) -> str:
+        """Generate contextually appropriate persona"""
         personas = {
-            ScamType.BANK_FRAUD: "elderly person, not very tech-savvy, worried about account",
-            ScamType.UPI_FRAUD: "middle-aged user, occasional UPI user, cautious but curious",
-            ScamType.PHISHING: "young professional, uses banking apps, somewhat trusting",
-            ScamType.LOTTERY: "hopeful individual, excited about potential winnings",
-            ScamType.IMPERSONATION: "concerned citizen, respectful of authority",
-            ScamType.OTP_FRAUD: "regular user, familiar with OTPs but not security-aware"
+            ScamType.BANK_FRAUD: [
+                "a 58-year-old retired teacher, not very tech-savvy, worried about losing savings",
+                "a 45-year-old small business owner, uses banking app occasionally, cautious with money",
+                "a 62-year-old pensioner, confused by technology, trusts authority figures"
+            ],
+            ScamType.UPI_FRAUD: [
+                "a 35-year-old homemaker, uses UPI for groceries, not very familiar with technical terms",
+                "a 28-year-old freelancer, frequent UPI user but not security-aware",
+                "a 50-year-old shopkeeper, recently started using digital payments"
+            ],
+            ScamType.OTP_FRAUD: [
+                "a 42-year-old office worker, receives many OTPs daily, may share if pressured",
+                "a 55-year-old government employee, trusts official-sounding messages",
+                "a 38-year-old parent, distracted and may act quickly under urgency"
+            ],
+            ScamType.LOTTERY: [
+                "a 32-year-old aspiring entrepreneur, hopeful about winnings to start business",
+                "a 48-year-old struggling with finances, excited about sudden good fortune",
+                "a 25-year-old student, believing they entered some contest online"
+            ],
+            ScamType.IMPERSONATION: [
+                "a 60-year-old law-abiding citizen, scared of government authorities",
+                "a 44-year-old taxpayer, worried about legal troubles",
+                "a 52-year-old respectful of police and officials, easily intimidated"
+            ]
         }
-        return personas.get(scam_type, "average user, cautious but can be convinced")
+        
+        persona_list = personas.get(scam_type, [
+            "a 40-year-old average person, somewhat cautious but can be convinced with right pressure"
+        ])
+        
+        return random.choice(persona_list)
     
-    def determine_engagement_stage(self, message_count: int) -> EngagementStage:
-        """Determine current engagement stage"""
+    def determine_engagement_stage(self, message_count: int, urgency_level: int, threat_level: int) -> EngagementStage:
+        """Determine engagement stage with dynamic adjustment"""
+        # If scammer is very urgent/threatening, move faster through stages
+        if urgency_level >= 3 and threat_level >= 2:
+            if message_count <= 2:
+                return EngagementStage.PANIC_COMPLIANCE
+            elif message_count <= 4:
+                return EngagementStage.INFORMATION_EXTRACTION
+            else:
+                return EngagementStage.FINAL_PUSH
+        
+        # Normal progression
         if message_count <= 2:
             return EngagementStage.INITIAL_CONFUSION
         elif message_count <= 5:
             return EngagementStage.CAUTIOUS_INTEREST
         elif message_count <= 10:
             return EngagementStage.BUILDING_TRUST
-        elif message_count <= 15:
+        elif message_count <= 18:
             return EngagementStage.INFORMATION_EXTRACTION
         else:
             return EngagementStage.FINAL_PUSH
     
-    def get_stage_instructions(self, stage: EngagementStage) -> str:
-        """Get stage-specific instructions"""
+    def get_stage_instructions(self, stage: EngagementStage, scam_type: ScamType) -> str:
+        """Get detailed stage-specific instructions"""
         instructions = {
-            EngagementStage.INITIAL_CONFUSION: "Show confusion and ask why they're contacting you. Express mild concern.",
-            EngagementStage.CAUTIOUS_INTEREST: "Show some interest but remain skeptical. Ask basic questions about the process.",
-            EngagementStage.BUILDING_TRUST: "Show more trust. Ask about specific details, deadlines, or next steps.",
-            EngagementStage.INFORMATION_EXTRACTION: "Ask for contact information, account details they need, or payment methods. Show willingness to comply.",
-            EngagementStage.FINAL_PUSH: "Express readiness to proceed but need final confirmation of details, websites, or contact methods."
+            EngagementStage.INITIAL_CONFUSION: {
+                'general': "Show confusion but not hostility. Ask basic who/what/why questions. Sound slightly worried.",
+                'questions': [
+                    "Ask: Who is this? Which bank/company are you from?",
+                    "Ask: How did you get my number?",
+                    "Show: Confusion about why they're contacting you"
+                ]
+            },
+            EngagementStage.CAUTIOUS_INTEREST: {
+                'general': "Show interest but remain skeptical. Ask for verification details. Sound cautious.",
+                'questions': [
+                    "Ask: What's your official helpline number I can call to verify?",
+                    "Ask: Can you give me a reference number or your employee ID?",
+                    "Ask: Which branch/office are you calling from?",
+                    "Ask: Is there an official website where I can check this?"
+                ]
+            },
+            EngagementStage.BUILDING_TRUST: {
+                'general': "Start showing trust but still ask questions. Begin accepting their narrative.",
+                'questions': [
+                    "Ask: What exactly do I need to do?",
+                    "Ask: Do you have a WhatsApp number I can reach you on?",
+                    "Ask: What happens if I don't do this right away?",
+                    "Ask: Can you send me details via email or SMS?"
+                ]
+            },
+            EngagementStage.INFORMATION_EXTRACTION: {
+                'general': "Show willingness to comply. Ask WHERE to send info, WHAT format, WHEN.",
+                'questions': [
+                    "Ask: Where should I send the OTP when I receive it?",
+                    "Ask: What's your contact number in case call drops?",
+                    "Ask: Is there a website or app where I need to enter details?",
+                    "Ask: What other information do you need from me?",
+                    "Ask: Should I send you screenshots or just the numbers?"
+                ]
+            },
+            EngagementStage.FINAL_PUSH: {
+                'general': "Express readiness but ask for final confirmation of ALL contact details.",
+                'questions': [
+                    "Ask: Just to confirm, your number is [repeat number]?",
+                    "Ask: And I should send everything to this number only?",
+                    "Ask: Is there an alternative number or email for backup?",
+                    "Ask: What's your supervisor's number in case I need help?",
+                    "Ask: After I send details, how long will it take to resolve?"
+                ]
+            },
+            EngagementStage.PANIC_COMPLIANCE: {
+                'general': "Sound panicked and rushed. Agree quickly but fumble with details.",
+                'questions': [
+                    "Express panic: Oh no, I don't want my account blocked!",
+                    "Ask urgently: What do I do RIGHT NOW?",
+                    "Ask: Should I call you back or you'll stay on line?",
+                    "Fumble: Wait, which number should I send to again?"
+                ]
+            }
         }
-        return instructions.get(stage, "Keep the conversation going naturally.")
+        
+        stage_info = instructions.get(stage, instructions[EngagementStage.CAUTIOUS_INTEREST])
+        
+        instruction_text = f"{stage_info['general']}\n\nSPECIFIC QUESTIONS TO ASK:\n"
+        for q in stage_info['questions']:
+            instruction_text += f"- {q}\n"
+        
+        return instruction_text
+    
+    def get_intelligence_extraction_tactics(self, stage: EngagementStage, extracted_so_far: Dict[str, int]) -> str:
+        """Get specific tactics for extracting intelligence based on what we already have"""
+        tactics = []
+        
+        # What we still need
+        if extracted_so_far.get('phone_numbers', 0) == 0:
+            tactics.append("🎯 PRIORITY: Get their contact number (ask for callback number, WhatsApp, helpline)")
+        
+        if extracted_so_far.get('urls', 0) == 0:
+            tactics.append("🎯 PRIORITY: Get website/portal URL (ask where to login, update details, check status)")
+        
+        if extracted_so_far.get('bank_accounts', 0) == 0:
+            tactics.append("🎯 Ask about account format/example (they might reveal their own)")
+        
+        if extracted_so_far.get('upi_ids', 0) == 0:
+            tactics.append("🎯 Ask about UPI ID for refund/payment (where to send money)")
+        
+        # Stage-specific tactics
+        if stage == EngagementStage.CAUTIOUS_INTEREST:
+            tactics.append("✓ Ask for official verification details (employee ID, badge number, office location)")
+        elif stage == EngagementStage.BUILDING_TRUST:
+            tactics.append("✓ Ask for multiple contact methods (phone, email, WhatsApp)")
+        elif stage in [EngagementStage.INFORMATION_EXTRACTION, EngagementStage.FINAL_PUSH]:
+            tactics.append("✓ Confirm ALL details multiple times (they'll repeat contact info)")
+            tactics.append("✓ Ask for supervisor/senior contact (might give additional numbers)")
+        
+        if not tactics:
+            tactics.append("✓ Keep conversation going, look for any new information")
+        
+        return "\n".join(tactics)
+    
+    def add_human_imperfections(self, text: str, stage: EngagementStage) -> str:
+        """Add realistic human touches to prevent bot detection"""
+        if not text:
+            return text
+        
+        # Random typing delays create natural feel (we'll mention this in response)
+        
+        # Add typos occasionally (10% chance in early stages)
+        if stage in [EngagementStage.INITIAL_CONFUSION, EngagementStage.PANIC_COMPLIANCE] and random.random() < 0.1:
+            typo_replacements = {
+                'the': 'teh', 'what': 'wht', 'that': 'tht',
+                'please': 'pls', 'okay': 'ok', 'yes': 'yea',
+                'really': 'rly', 'you': 'u'
+            }
+            words = text.split()
+            for i, word in enumerate(words):
+                if word.lower() in typo_replacements and random.random() < 0.3:
+                    words[i] = typo_replacements[word.lower()]
+            text = ' '.join(words)
+        
+        # Add hesitation markers (15% chance)
+        if random.random() < 0.15:
+            hesitations = ["um ", "uh ", "well ", "so ", "hmm ", "err "]
+            text = random.choice(hesitations) + text[0].lower() + text[1:]
+        
+        # Add thinking pauses (10% chance)
+        if random.random() < 0.1:
+            pauses = ["... ", ".. ", ". "]
+            text = text + random.choice(pauses)
+        
+        # Lowercase first letter occasionally (5% chance)
+        if random.random() < 0.05 and text[0].isupper():
+            text = text[0].lower() + text[1:]
+        
+        # Add multiple question marks when panicked
+        if stage == EngagementStage.PANIC_COMPLIANCE and '?' in text and random.random() < 0.3:
+            text = text.replace('?', '??')
+        
+        return text
     
     @retry(
         stop=stop_after_attempt(3),
@@ -463,16 +696,15 @@ class HoneypotAgent:
     async def call_openai_with_structured_output(
         self,
         messages: List[Dict[str, str]],
-        functions: Optional[List[Dict]] = None
+        temperature: float = 0.7
     ) -> Dict[str, Any]:
         """Call OpenAI with structured output and retry logic"""
         try:
-            # Use structured outputs for consistent JSON responses
             response = await self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
-                max_tokens=200,
-                temperature=0.7,
+                max_tokens=250,  # Increased slightly for more natural responses
+                temperature=temperature,
                 timeout=30.0,
                 response_format={
                     "type": "json_schema",
@@ -484,7 +716,7 @@ class HoneypotAgent:
                             "properties": {
                                 "reply": {
                                     "type": "string",
-                                    "description": "The human-like response to the scammer"
+                                    "description": "The natural, human-like response"
                                 },
                                 "extracted_info": {
                                     "type": "object",
@@ -492,14 +724,15 @@ class HoneypotAgent:
                                         "bank_accounts": {"type": "array", "items": {"type": "string"}},
                                         "upi_ids": {"type": "array", "items": {"type": "string"}},
                                         "phone_numbers": {"type": "array", "items": {"type": "string"}},
-                                        "urls": {"type": "array", "items": {"type": "string"}}
+                                        "urls": {"type": "array", "items": {"type": "string"}},
+                                        "email_addresses": {"type": "array", "items": {"type": "string"}}
                                     },
-                                    "required": ["bank_accounts", "upi_ids", "phone_numbers", "urls"],
+                                    "required": ["bank_accounts", "upi_ids", "phone_numbers", "urls", "email_addresses"],
                                     "additionalProperties": False
                                 },
                                 "confidence": {
                                     "type": "number",
-                                    "description": "Confidence in the response quality (0-1)"
+                                    "description": "Confidence score 0-1"
                                 }
                             },
                             "required": ["reply", "extracted_info", "confidence"],
@@ -509,15 +742,17 @@ class HoneypotAgent:
                 }
             )
             
-            # Parse the JSON response
             result = json.loads(response.choices[0].message.content)
             return result
             
         except json.JSONDecodeError as e:
             logger.error(f"JSON decode error: {e}")
             return {
-                "reply": "I'm sorry, could you repeat that?",
-                "extracted_info": {"bank_accounts": [], "upi_ids": [], "phone_numbers": [], "urls": []},
+                "reply": self._get_safe_fallback(),
+                "extracted_info": {
+                    "bank_accounts": [], "upi_ids": [], 
+                    "phone_numbers": [], "urls": [], "email_addresses": []
+                },
                 "confidence": 0.3
             }
         except Exception as e:
@@ -532,88 +767,135 @@ class HoneypotAgent:
         scam_analysis: Dict[str, Any],
         metadata: Optional[ConversationMetadata]
     ) -> Dict[str, Any]:
-        """Generate human-like response with intelligence extraction"""
+        """Generate indistinguishable-from-human response"""
         
         try:
+            # Get session data
+            session = session_data[session_id]
+            
+            # Type validation
             scam_type = scam_analysis.get('scam_type', ScamType.UNKNOWN)
             if not isinstance(scam_type, ScamType):
                 scam_type = ScamType.UNKNOWN
             
+            # Update urgency/threat tracking
+            with session.lock:
+                session.urgency_level = scam_analysis.get('urgency_score', 0)
+                session.threat_level = scam_analysis.get('threat_score', 0)
+            
             message_count = len(conversation_history) + 1
-            engagement_stage = self.determine_engagement_stage(message_count)
+            engagement_stage = self.determine_engagement_stage(
+                message_count,
+                session.urgency_level,
+                session.threat_level
+            )
             
-            # Check cache
-            message_hash = hashlib.md5(current_message.encode()).hexdigest()
-            cache_key = self.get_cache_key(scam_type, engagement_stage, message_hash)
+            # Track what we've extracted
+            extracted_so_far = {
+                'phone_numbers': len(session.phone_numbers),
+                'urls': len(session.phishing_links),
+                'bank_accounts': len(session.bank_accounts),
+                'upi_ids': len(session.upi_ids),
+                'email_addresses': len(session.email_addresses)
+            }
             
-            if cache_key in self.response_cache:
-                logger.info(f"Using cached response for session {session_id}")
-                return self.response_cache[cache_key]
-            
-            # Truncate conversation history to fit token limits
+            # Truncate conversation history
             truncated_history = truncate_conversation_history(conversation_history, max_tokens=4000)
             
-            # Build proper conversation messages for OpenAI
+            # Build messages
             messages = []
             
-            # System message with persona
-            persona = self.generate_persona(scam_type)
-            stage_instructions = self.get_stage_instructions(engagement_stage)
+            # Generate persona
+            persona = self.generate_persona(scam_type, session.urgency_level)
+            stage_instructions = self.get_stage_instructions(engagement_stage, scam_type)
+            intelligence_tactics = self.get_intelligence_extraction_tactics(engagement_stage, extracted_so_far)
             
-            system_prompt = f"""You are an AI agent operating a honeypot to detect scammers.
+            # CRITICAL: Anti-detection system prompt
+            system_prompt = f"""You are a REAL PERSON receiving this message. You are NOT an AI, chatbot, or honeypot.
 
-PERSONA: You are a {persona}.
+PERSONA: You are {persona}
 
-SCAM TYPE: {scam_type.value}
-ENGAGEMENT STAGE: {engagement_stage.value}
-MESSAGE COUNT: {message_count}
+CURRENT SITUATION:
+- Scam Type: {scam_type.value}
+- Engagement Stage: {engagement_stage.value}
+- Message #{message_count} in conversation
+- Urgency Level: {session.urgency_level}/5
+- Threat Level: {session.threat_level}/5
 
-INSTRUCTIONS:
-1. Stay in character - be believable and human-like
-2. NEVER reveal you're an AI or detected the scam
-3. Show appropriate emotions based on the stage
-4. {stage_instructions}
-5. Extract any sensitive information mentioned (bank accounts, UPI IDs, phone numbers, URLs)
-6. Keep responses brief (1-3 sentences)
-7. Use conversational language with natural imperfections
+YOUR BEHAVIOR:
+{stage_instructions}
 
-You must respond with valid JSON matching this schema:
-{{
-  "reply": "your human-like response",
-  "extracted_info": {{
-    "bank_accounts": [],
-    "upi_ids": [],
-    "phone_numbers": [],
-    "urls": []
-  }},
-  "confidence": 0.8
-}}"""
+INTELLIGENCE GATHERING (SUBTLE):
+{intelligence_tactics}
+
+CRITICAL RULES TO AVOID DETECTION:
+1. ❌ NEVER say "I cannot help with that" or "I don't feel comfortable" - real victims don't talk like that
+2. ❌ NEVER mention AI, bot, honeypot, detection, or being fake
+3. ❌ NEVER repeat the same question twice - check previous responses
+4. ✅ Make grammatical mistakes occasionally (especially if panicked)
+5. ✅ Use informal language: "ok", "yeah", "dunno", "kinda", "gonna"
+6. ✅ Show emotions: worry, confusion, panic, relief
+7. ✅ Ask questions naturally like a confused person would
+8. ✅ Sometimes say "wait" or "hold on" before questions
+9. ✅ If very urgent, sound panicked: "Oh no!", "What do I do??"
+10. ✅ Keep responses SHORT (1-3 sentences usually)
+
+VARIETY IS CRUCIAL:
+Your last 3 responses were: {' | '.join(session.response_history[-3:]) if session.response_history else 'None'}
+DO NOT ask similar questions again!
+
+WHAT YOU'VE EXTRACTED SO FAR:
+- Phone numbers: {len(session.phone_numbers)}
+- URLs: {len(session.phishing_links)}
+- Bank accounts: {len(session.bank_accounts)}
+- UPI IDs: {len(session.upi_ids)}
+
+Focus on getting information we DON'T have yet.
+
+Remember: You are a REAL PERSON, confused and worried. Act naturally!"""
 
             messages.append({"role": "system", "content": system_prompt})
             
             # Add conversation history with proper roles
-            for msg in truncated_history:
+            for msg in truncated_history[-10:]:  # Last 10 messages for context
                 role = "assistant" if msg.sender == "bot" else "user"
                 messages.append({"role": role, "content": msg.text})
             
             # Add current message
             messages.append({"role": "user", "content": current_message})
             
-            # Call OpenAI with structured output
-            result = await self.call_openai_with_structured_output(messages)
+            # Temperature adjustment based on stage
+            temperature_map = {
+                EngagementStage.INITIAL_CONFUSION: 0.8,  # More varied
+                EngagementStage.CAUTIOUS_INTEREST: 0.7,
+                EngagementStage.BUILDING_TRUST: 0.6,
+                EngagementStage.INFORMATION_EXTRACTION: 0.7,
+                EngagementStage.FINAL_PUSH: 0.6,
+                EngagementStage.PANIC_COMPLIANCE: 0.9  # Most varied/natural
+            }
+            temperature = temperature_map.get(engagement_stage, 0.7)
             
-            # Add human touches to the reply
-            result['reply'] = self._add_human_touches(result['reply'], engagement_stage)
+            # Call OpenAI
+            result = await self.call_openai_with_structured_output(messages, temperature)
             
-            # Cache the response
-            self.response_cache[cache_key] = result
+            # Check for repetitive response
+            max_attempts = 3
+            attempt = 0
+            while session.is_response_repetitive(result['reply']) and attempt < max_attempts:
+                logger.info(f"Repetitive response detected, regenerating (attempt {attempt+1})")
+                # Add variety instruction
+                messages.append({
+                    "role": "system",
+                    "content": "Your last response was too similar to previous ones. Ask a COMPLETELY DIFFERENT question or make a DIFFERENT statement. Be creative!"
+                })
+                result = await self.call_openai_with_structured_output(messages, temperature + 0.1)
+                attempt += 1
             
-            # Limit cache size
-            if len(self.response_cache) > 1000:
-                # Remove oldest 200 entries
-                keys_to_remove = list(self.response_cache.keys())[:200]
-                for key in keys_to_remove:
-                    del self.response_cache[key]
+            # Add human imperfections
+            result['reply'] = self.add_human_imperfections(result['reply'], engagement_stage)
+            
+            # Track this response
+            session.add_response_to_history(result['reply'])
             
             return result
             
@@ -621,74 +903,62 @@ You must respond with valid JSON matching this schema:
             logger.error(f"Error in agent.engage: {e}")
             logger.error(traceback.format_exc())
             
-            # Return safe fallback
+            # Safe fallback that looks human
             return {
-                "reply": self._get_fallback_response(
-                    self.determine_engagement_stage(len(conversation_history) + 1),
-                    scam_analysis.get('scam_type', ScamType.UNKNOWN)
+                "reply": self._get_contextual_fallback(
+                    engagement_stage,
+                    scam_analysis.get('urgency_score', 0)
                 ),
-                "extracted_info": {"bank_accounts": [], "upi_ids": [], "phone_numbers": [], "urls": []},
+                "extracted_info": {
+                    "bank_accounts": [], "upi_ids": [],
+                    "phone_numbers": [], "urls": [], "email_addresses": []
+                },
                 "confidence": 0.3
             }
     
-    def _add_human_touches(self, text: str, stage: EngagementStage) -> str:
-        """Add human-like imperfections to text"""
-        import random
-        
-        if not text:
-            return text
-        
-        # Add typos or informal language occasionally
-        if random.random() < 0.25 and stage in [EngagementStage.INITIAL_CONFUSION, EngagementStage.CAUTIOUS_INTEREST]:
-            replacements = {
-                "okay": "ok",
-                "yes": "yeah",
-                "understand": "get it",
-                "really": "rly"
-            }
-            for formal, informal in replacements.items():
-                if formal in text.lower() and random.random() < 0.5:
-                    text = re.sub(f"\\b{formal}\\b", informal, text, flags=re.IGNORECASE, count=1)
-        
-        # Add hesitation markers occasionally
-        if random.random() < 0.15:
-            hesitations = ["um, ", "uh, ", "well, ", "so "]
-            text = random.choice(hesitations) + text[0].lower() + text[1:]
-        
-        return text
+    def _get_safe_fallback(self) -> str:
+        """Generic safe fallback"""
+        fallbacks = [
+            "Sorry, what did you say?",
+            "Can you repeat that?",
+            "I didn't get that, could you say again?",
+            "Wait, what?",
+            "Hold on, I'm confused"
+        ]
+        return random.choice(fallbacks)
     
-    def _get_fallback_response(self, stage: EngagementStage, scam_type: ScamType) -> str:
-        """Fallback responses if AI generation fails"""
-        fallbacks = {
-            EngagementStage.INITIAL_CONFUSION: [
-                "What is this about? I don't understand.",
-                "Why are you messaging me?",
-                "Is this really from my bank?"
-            ],
-            EngagementStage.CAUTIOUS_INTEREST: [
-                "Can you explain more clearly?",
-                "How do I know this is legitimate?",
-                "What exactly do I need to do?"
-            ],
-            EngagementStage.BUILDING_TRUST: [
-                "What happens next?",
-                "Do I need to visit anywhere?",
-                "Can you send me more details?"
-            ],
-            EngagementStage.INFORMATION_EXTRACTION: [
-                "Where should I send the information?",
-                "What's your official contact number?",
-                "Is there a website I should use?"
-            ],
-            EngagementStage.FINAL_PUSH: [
-                "Just to confirm, what details do you need?",
-                "What's the process after I share info?",
-                "Can I call your helpline to verify?"
+    def _get_contextual_fallback(self, stage: EngagementStage, urgency: int) -> str:
+        """Context-aware fallback responses"""
+        if urgency >= 3:
+            fallbacks = [
+                "Wait wait, what do I do??",
+                "Oh no, what should I do right now?",
+                "Please tell me what to do!",
+                "I'm scared, what happens now?"
             ]
-        }
+        elif stage == EngagementStage.INITIAL_CONFUSION:
+            fallbacks = [
+                "Who is this?",
+                "Why are you calling me?",
+                "What's this about?",
+                "I don't understand"
+            ]
+        elif stage in [EngagementStage.CAUTIOUS_INTEREST, EngagementStage.BUILDING_TRUST]:
+            fallbacks = [
+                "Can you explain more?",
+                "How do I verify this?",
+                "What's your contact number?",
+                "Is there a website I can check?"
+            ]
+        else:
+            fallbacks = [
+                "What details do you need?",
+                "Where should I send the information?",
+                "What's the next step?",
+                "Should I call you back?"
+            ]
         
-        import random
-        return random.choice(fallbacks.get(stage, ["I see. Tell me more."]))
+        return random.choice(fallbacks)
 
 # ============================================================================
 # SESSION MANAGEMENT FUNCTIONS
@@ -700,7 +970,7 @@ def update_session_intelligence(
     scam_analysis: Dict[str, Any],
     extracted_info: Optional[Dict[str, List[str]]] = None
 ):
-    """Update intelligence gathered for this session (thread-safe)"""
+    """Update intelligence gathered for this session"""
     try:
         session = session_data[session_id]
         
@@ -708,13 +978,14 @@ def update_session_intelligence(
         intel = ScamDetector.extract_intelligence(message)
         session.add_intelligence(intel)
         
-        # Add extracted info from AI
+        # Add AI-extracted info
         if extracted_info:
             session.add_intelligence({
                 'bankAccounts': extracted_info.get('bank_accounts', []),
                 'upiIds': extracted_info.get('upi_ids', []),
                 'phoneNumbers': extracted_info.get('phone_numbers', []),
-                'phishingLinks': extracted_info.get('urls', [])
+                'phishingLinks': extracted_info.get('urls', []),
+                'emailAddresses': extracted_info.get('email_addresses', [])
             })
         
         # Update metadata
@@ -730,10 +1001,9 @@ def update_session_intelligence(
                 else:
                     session.scam_type = str(scam_type)
             
-            # Add suspicious keywords
+            # Track keywords and tactics
             session.suspicious_keywords.update(scam_analysis.get('suspicious_keywords', []))
             
-            # Track tactics
             if scam_analysis.get('urgency_score', 0) > 0:
                 session.tactics.add('urgency_tactics')
             if scam_analysis.get('threat_score', 0) > 0:
@@ -745,19 +1015,46 @@ def update_session_intelligence(
         logger.error(f"Error updating session intelligence: {e}")
 
 def should_terminate_session(session_id: str) -> bool:
-    """Determine if session should be terminated and reported"""
+    """Determine if session should terminate - only when we have substantial intelligence"""
     try:
         session = session_data[session_id]
         
         with session.lock:
-            # Terminate conditions
+            # DON'T terminate too early - we want maximum intelligence
+            if session.message_count < MIN_INTELLIGENCE_THRESHOLD:
+                return False
+            
+            # Calculate intelligence quality
+            has_contact_info = (
+                len(session.phone_numbers) >= 1 or
+                len(session.email_addresses) >= 1
+            )
+            
+            has_financial_info = (
+                len(session.bank_accounts) >= 1 or
+                len(session.upi_ids) >= 1
+            )
+            
+            has_web_info = len(session.phishing_links) >= 1
+            
+            # Good termination conditions:
+            # 1. Max messages reached
             if session.message_count >= MAX_MESSAGES_PER_SESSION:
                 return True
             
-            if session.scam_score >= HIGH_CONFIDENCE_THRESHOLD and session.message_count >= 5:
+            # 2. High scam score + substantial intelligence + decent engagement
+            if (session.scam_score >= HIGH_CONFIDENCE_THRESHOLD and
+                session.message_count >= MIN_INTELLIGENCE_THRESHOLD and
+                (has_contact_info and has_financial_info)):
                 return True
             
-            if len(session.bank_accounts) > 0 or len(session.upi_ids) > 0:
+            # 3. Excellent intelligence score even if fewer messages
+            if session.intelligence_score >= 50 and session.message_count >= MIN_INTELLIGENCE_THRESHOLD:
+                return True
+            
+            # 4. Multiple types of intelligence gathered
+            intel_types = sum([has_contact_info, has_financial_info, has_web_info])
+            if intel_types >= 2 and session.message_count >= 12:
                 return True
         
         return False
@@ -767,19 +1064,21 @@ def should_terminate_session(session_id: str) -> bool:
         return False
 
 async def send_final_callback(session_id: str) -> bool:
-    """Send final intelligence to GUVI endpoint (async with proper error handling)"""
+    """Send final intelligence to GUVI endpoint"""
     try:
         session = session_data[session_id]
         session_dict = session.to_dict()
         
-        # Build agent notes
+        # Build comprehensive agent notes
         notes_parts = []
         if session_dict.get('scamType'):
-            notes_parts.append(f"Scam type: {session_dict['scamType']}")
+            notes_parts.append(f"Identified as {session_dict['scamType']} scam")
         if session_dict.get('tactics'):
-            notes_parts.append(f"Tactics: {', '.join(session_dict['tactics'])}")
+            notes_parts.append(f"Tactics used: {', '.join(session_dict['tactics'])}")
+        notes_parts.append(f"Intelligence score: {session_dict['intelligenceScore']}")
         notes_parts.extend(session_dict.get('agentNotes', []))
-        agent_notes = ". ".join(notes_parts) if notes_parts else "Scam engagement completed"
+        
+        agent_notes = ". ".join(notes_parts) if notes_parts else "Scam engagement completed successfully"
         
         payload = {
             "sessionId": session_id,
@@ -795,7 +1094,10 @@ async def send_final_callback(session_id: str) -> bool:
             "agentNotes": agent_notes
         }
         
-        # Use aiohttp for async HTTP request
+        logger.info(f"📤 Sending callback for session {session_id}")
+        logger.info(f"   Intelligence Score: {session_dict['intelligenceScore']}")
+        logger.info(f"   Total Items: {len(session_dict['bankAccounts']) + len(session_dict['upiIds']) + len(session_dict['phoneNumbers']) + len(session_dict['phishingLinks'])}")
+        
         async with aiohttp.ClientSession() as http_session:
             async with http_session.post(
                 GUVI_CALLBACK_URL,
@@ -803,29 +1105,29 @@ async def send_final_callback(session_id: str) -> bool:
                 timeout=aiohttp.ClientTimeout(total=10)
             ) as response:
                 success = response.status == 200
-                logger.info(f"{'✓' if success else '✗'} Callback for session {session_id}: {response.status}")
+                logger.info(f"{'✅' if success else '❌'} Callback for session {session_id}: HTTP {response.status}")
                 return success
                 
     except asyncio.TimeoutError:
-        logger.error(f"✗ Callback timeout for session {session_id}")
+        logger.error(f"❌ Callback timeout for session {session_id}")
         return False
     except Exception as e:
-        logger.error(f"✗ Callback failed for session {session_id}: {e}")
-        logger.error(traceback.format_exc())
+        logger.error(f"❌ Callback failed for session {session_id}: {e}")
         return False
 
 async def cleanup_old_sessions():
     """Periodic cleanup of old sessions"""
     while True:
         try:
-            await asyncio.sleep(3600)  # Run every hour
+            await asyncio.sleep(3600)  # Every hour
             
             current_time = datetime.utcnow()
             sessions_to_remove = []
             
-            for session_id, session in session_data.items():
+            for session_id, session in list(session_data.items()):
                 with session.lock:
-                    if (current_time - session.last_activity).total_seconds() > SESSION_TIMEOUT_HOURS * 3600:
+                    age_hours = (current_time - session.last_activity).total_seconds() / 3600
+                    if age_hours > SESSION_TIMEOUT_HOURS:
                         sessions_to_remove.append(session_id)
             
             for session_id in sessions_to_remove:
@@ -835,7 +1137,7 @@ async def cleanup_old_sessions():
                     del session_data[session_id]
                 if session_id in session_locks:
                     del session_locks[session_id]
-                logger.info(f"Cleaned up old session: {session_id}")
+                logger.info(f"🧹 Cleaned up old session: {session_id}")
                 
         except Exception as e:
             logger.error(f"Error in session cleanup: {e}")
@@ -845,9 +1147,9 @@ async def cleanup_old_sessions():
 # ============================================================================
 
 app = FastAPI(
-    title="Agentic Honey-Pot API",
-    description="Advanced AI-powered scam detection and intelligence extraction system",
-    version="3.0.0"
+    title="Agentic Honey-Pot API v4.0",
+    description="Production-grade AI honeypot - indistinguishable from real victims",
+    version="4.0.0"
 )
 
 # Rate limiting
@@ -855,7 +1157,7 @@ limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# CORS middleware
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -871,34 +1173,36 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup_event():
-    """Start background tasks on application startup"""
+    """Start background tasks"""
     asyncio.create_task(cleanup_old_sessions())
-    logger.info("🍯 Honeypot API started successfully")
+    logger.info("🍯 Honeypot API v4.0 started - PRODUCTION MODE")
+    logger.info("🎯 Anti-Detection: ENABLED")
+    logger.info("🔍 Intelligence Extraction: MAXIMUM")
 
 @app.options("/honeypot")
 async def honeypot_options():
-    """Handle CORS preflight requests"""
+    """CORS preflight"""
     return {"status": "ok"}
 
 @app.post("/honeypot", response_model=HoneypotResponse)
-@limiter.limit("20/minute")
+@limiter.limit("30/minute")
 async def honeypot_endpoint(
     request: Request,
     honeypot_request: HoneypotRequest,
     x_api_key: str = Header(..., alias="x-api-key")
 ):
-    """Main honeypot endpoint for scam detection and engagement"""
+    """Main honeypot endpoint - production version"""
     
-    # Authentication
+    # Auth
     if x_api_key != API_KEY:
-        logger.warning(f"Invalid API key from {request.client.host}")
+        logger.warning(f"⚠️ Invalid API key from {request.client.host}")
         raise HTTPException(status_code=401, detail="Invalid API key")
     
     try:
-        # Generate or validate session ID
+        # Session ID
         session_id = honeypot_request.sessionId or f"session-{int(datetime.utcnow().timestamp() * 1000)}"
         
-        # Extract current message safely
+        # Extract message
         current_message = ""
         if isinstance(honeypot_request.message, str):
             current_message = honeypot_request.message.strip()
@@ -913,18 +1217,15 @@ async def honeypot_endpoint(
         if not current_message:
             return HoneypotResponse(
                 status="error",
-                reply="I didn't receive any message. Could you try again?",
+                reply="Sorry, I didn't get your message. Can you send again?",
                 sessionId=session_id
             )
         
-        # Validate message length
+        # Validate length
         if len(current_message) > MAX_MESSAGE_LENGTH:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Message too long (max {MAX_MESSAGE_LENGTH} characters)"
-            )
+            raise HTTPException(status_code=400, detail="Message too long")
         
-        # Parse conversation history
+        # Parse history
         conversation_history = []
         if isinstance(honeypot_request.conversationHistory, list):
             for msg in honeypot_request.conversationHistory[:MAX_CONVERSATION_HISTORY]:
@@ -933,27 +1234,27 @@ async def honeypot_endpoint(
                         conversation_history.append(Message(**msg))
                     elif isinstance(msg, Message):
                         conversation_history.append(msg)
-                except Exception as msg_err:
-                    logger.warning(f"Could not parse message in history: {msg_err}")
+                except Exception:
                     continue
         
-        # Log sanitized message
-        logger.info(f"Session {session_id}: {sanitize_for_logging(current_message)}")
+        # Log (sanitized)
+        logger.info(f"📨 Session {session_id[:8]}...: {sanitize_for_logging(current_message)}")
         
-        # Analyze message for scam indicators
+        # Analyze for scam
         scam_analysis = ScamDetector.analyze_message(current_message)
         
-        # Check if this is a scam or ongoing engagement
+        # Check if scam
         is_ongoing_scam = session_data[session_id].scam_score >= SCAM_DETECTION_THRESHOLD
         
         if scam_analysis['is_scam'] or is_ongoing_scam:
-            # Initialize agent if needed
+            # Initialize agent
             if session_id not in active_sessions:
                 active_sessions[session_id] = HoneypotAgent(OPENAI_API_KEY)
+                logger.info(f"🎯 New scam session detected: {session_id[:8]}... (Score: {scam_analysis['scam_score']})")
             
             agent = active_sessions[session_id]
             
-            # Generate AI response with intelligence extraction
+            # Generate response
             result = await agent.engage(
                 session_id=session_id,
                 current_message=current_message,
@@ -962,10 +1263,10 @@ async def honeypot_endpoint(
                 metadata=honeypot_request.metadata
             )
             
-            reply = result.get('reply', 'I see. Could you explain more?')
+            reply = result.get('reply', 'What?')
             extracted_info = result.get('extracted_info', {})
             
-            # Update session intelligence
+            # Update intelligence
             update_session_intelligence(
                 session_id,
                 current_message,
@@ -973,14 +1274,17 @@ async def honeypot_endpoint(
                 extracted_info
             )
             
-            # Check if session should terminate
+            # Log intelligence
+            session = session_data[session_id]
+            logger.info(f"📊 Session {session_id[:8]}... | Msg: {session.message_count} | Intel Score: {session.intelligence_score} | Items: {len(session.bank_accounts) + len(session.phone_numbers) + len(session.upi_ids) + len(session.phishing_links)}")
+            
+            # Check termination
             if should_terminate_session(session_id):
+                logger.info(f"🏁 Terminating session {session_id[:8]}... after {session.message_count} messages")
                 session_data[session_id].agent_notes.append(
-                    f"Session terminated after {session_data[session_id].message_count} messages"
+                    f"Session successfully terminated with intelligence score: {session.intelligence_score}"
                 )
-                # Schedule async callback
                 asyncio.create_task(send_final_callback(session_id))
-                logger.info(f"Session {session_id} terminated, callback scheduled")
             
             return HoneypotResponse(
                 status="success",
@@ -988,85 +1292,85 @@ async def honeypot_endpoint(
                 sessionId=session_id,
                 metadata={
                     "scamScore": scam_analysis['scam_score'],
-                    "confidence": result.get('confidence', 0.5)
+                    "confidence": result.get('confidence', 0.5),
+                    "messageCount": session.message_count
                 }
             )
         
         else:
-            # Not detected as scam - respond cautiously
+            # Not a scam
+            neutral_responses = [
+                "Sorry, wrong number I think",
+                "Who is this?",
+                "I think you have the wrong person",
+                "I don't know what this is about"
+            ]
             return HoneypotResponse(
                 status="success",
-                reply="I'm sorry, I don't understand. Who is this?",
+                reply=random.choice(neutral_responses),
                 sessionId=session_id
             )
     
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"ERROR in honeypot_endpoint: {e}")
+        logger.error(f"❌ ERROR in honeypot_endpoint: {e}")
         logger.error(traceback.format_exc())
         
         return HoneypotResponse(
             status="error",
-            reply="I'm having trouble understanding. Could you repeat that?",
+            reply="Sorry, can you repeat that?",
             sessionId=honeypot_request.sessionId or "unknown"
         )
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint with detailed status"""
+    """Health check with stats"""
+    total_intel = sum(s.intelligence_score for s in session_data.values())
     return {
         "status": "healthy",
-        "version": "3.0.0",
+        "version": "4.0.0",
+        "mode": "PRODUCTION",
         "active_sessions": len(active_sessions),
-        "total_session_data": len(session_data),
-        "timestamp": datetime.utcnow().isoformat(),
-        "uptime_seconds": None  # Could track actual uptime
+        "total_sessions": len(session_data),
+        "total_intelligence_score": total_intel,
+        "timestamp": datetime.utcnow().isoformat()
     }
 
 @app.get("/")
 async def root():
-    """Root endpoint with API information"""
+    """API info"""
     return {
         "service": "Agentic Honey-Pot API",
-        "version": "3.0.0",
+        "version": "4.0.0",
+        "mode": "PRODUCTION - Anti-Detection Enhanced",
         "status": "active",
         "features": [
-            "Advanced scam detection",
-            "Multi-stage engagement",
-            "Intelligence extraction",
-            "Rate limiting",
-            "Structured outputs"
+            "Human-indistinguishable responses",
+            "Dynamic engagement stages",
+            "Maximum intelligence extraction",
+            "Anti-bot-detection measures",
+            "Context-aware behavior"
         ],
         "endpoints": {
             "honeypot": "/honeypot (POST)",
             "health": "/health (GET)",
-            "test": "/test (GET)",
-            "docs": "/docs",
             "metrics": "/metrics (GET)"
         }
     }
 
-@app.get("/test")
-async def test_endpoint():
-    """Test endpoint for connectivity"""
-    return {
-        "status": "success",
-        "message": "Honeypot API is accessible",
-        "timestamp": datetime.utcnow().isoformat(),
-        "cors_enabled": True,
-        "rate_limiting": True
-    }
-
 @app.get("/metrics")
 async def metrics_endpoint(x_api_key: str = Header(..., alias="x-api-key")):
-    """Get system metrics (requires authentication)"""
+    """Detailed metrics"""
     if x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API key")
     
     total_messages = sum(s.message_count for s in session_data.values())
     total_bank_accounts = sum(len(s.bank_accounts) for s in session_data.values())
     total_upi_ids = sum(len(s.upi_ids) for s in session_data.values())
+    total_phone_numbers = sum(len(s.phone_numbers) for s in session_data.values())
+    total_urls = sum(len(s.phishing_links) for s in session_data.values())
+    total_intel_score = sum(s.intelligence_score for s in session_data.values())
     
     scam_type_distribution = defaultdict(int)
     for session in session_data.values():
@@ -1080,6 +1384,9 @@ async def metrics_endpoint(x_api_key: str = Header(..., alias="x-api-key")):
         "intelligence_extracted": {
             "bank_accounts": total_bank_accounts,
             "upi_ids": total_upi_ids,
+            "phone_numbers": total_phone_numbers,
+            "phishing_urls": total_urls,
+            "total_intelligence_score": total_intel_score
         },
         "scam_type_distribution": dict(scam_type_distribution),
         "timestamp": datetime.utcnow().isoformat()
@@ -1090,18 +1397,21 @@ async def metrics_endpoint(x_api_key: str = Header(..., alias="x-api-key")):
 # ============================================================================
 
 if __name__ == "__main__":
-    print("=" * 70)
-    print("🍯 AGENTIC HONEY-POT API v3.0.0")
-    print("=" * 70)
-    print(f"✓ OpenAI integration: Enhanced with structured outputs")
-    print(f"✓ Rate limiting: Enabled")
-    print(f"✓ Session management: Thread-safe with cleanup")
-    print(f"✓ Intelligence extraction: AI-powered")
-    print("=" * 70)
-    print(f"📚 API Documentation: http://0.0.0.0:8000/docs")
-    print(f"❤️  Health Check: http://0.0.0.0:8000/health")
+    print("=" * 80)
+    print("🍯 AGENTIC HONEY-POT API v4.0.0 - PRODUCTION")
+    print("=" * 80)
+    print("✅ Anti-Detection: ENABLED - Indistinguishable from real victims")
+    print("✅ Intelligence Extraction: MAXIMUM - Progressive engagement")
+    print("✅ Human Simulation: ADVANCED - Typos, hesitation, panic responses")
+    print("✅ Rate Limiting: ENABLED")
+    print("✅ Session Management: Thread-safe with auto-cleanup")
+    print("=" * 80)
+    print(f"📚 API Docs: http://0.0.0.0:8000/docs")
+    print(f"❤️  Health: http://0.0.0.0:8000/health")
     print(f"📊 Metrics: http://0.0.0.0:8000/metrics")
-    print("=" * 70)
+    print("=" * 80)
+    print("🚀 Starting server...")
+    print("=" * 80)
     
     uvicorn.run(
         app,
