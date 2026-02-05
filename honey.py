@@ -1,33 +1,30 @@
 """
-Agentic Honey-Pot v5.0 - Intelligent LLM Brain
-Strategic Intelligence Extraction with Minimal Redundancy
+Agentic Honey-Pot v5.1 - Optimized Intelligent Brain
+Single LLM call, better strategic prompting, focused intelligence extraction
 
-Key Improvements:
-1. LLM analyzes conversation strategically before responding
-2. Tracks what's been asked/extracted to avoid redundancy
-3. Dynamic strategy based on scammer behavior
-4. Natural progression without rigid stage rules
-5. Terminates intelligently when maximum intel extracted
+Key Fixes:
+1. Single LLM call (analysis + response in one)
+2. Stronger strategic guidance to avoid repetitive questions
+3. Explicit "what to ask" examples based on gaps
+4. Faster response times
 """
 
 from fastapi import FastAPI, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, validator
 from typing import List, Optional, Dict, Any, Union
 from openai import AsyncOpenAI
-from enum import Enum
 import uvicorn
 import asyncio
 import aiohttp
 import re
 import json
 from datetime import datetime
-import hashlib
 import traceback
 import logging
 from collections import defaultdict
 import threading
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from tenacity import retry, stop_after_attempt, wait_exponential
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
@@ -37,10 +34,7 @@ import random
 # LOGGING
 # ============================================================================
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # ============================================================================
@@ -58,7 +52,7 @@ if not API_KEY or not OPENAI_API_KEY:
 GUVI_CALLBACK_URL = "https://hackathon.guvi.in/api/updateHoneyPotFinalResult"
 
 MAX_MESSAGE_LENGTH = 5000
-MAX_MESSAGES_PER_SESSION = 20
+MAX_MESSAGES_PER_SESSION = 18
 MIN_MESSAGES_FOR_TERMINATION = 6
 
 # ============================================================================
@@ -92,7 +86,7 @@ class HoneypotResponse(BaseModel):
 # ============================================================================
 
 class IntelligenceTracker:
-    """Smart tracker that knows what we have and what we need"""
+    """Smart tracker for extracted intelligence"""
     
     def __init__(self):
         self.bank_accounts = set()
@@ -101,10 +95,8 @@ class IntelligenceTracker:
         self.urls = set()
         self.email_addresses = set()
         self.keywords = set()
-        self.tactics_observed = set()
-        self.questions_asked = []  # Track what we've asked
+        self.questions_asked = []  # Track question types
         self.message_count = 0
-        self.scam_confidence = 0
         self.lock = threading.Lock()
     
     def extract_from_text(self, text: str):
@@ -115,7 +107,7 @@ class IntelligenceTracker:
             self.bank_accounts.update(accounts)
             
             # UPI IDs
-            upi_ids = re.findall(r'\b[\w\.-]+@(?:paytm|phonepe|ybl|oksbi|okhdfcbank|okicici|okaxis|axl|ibl)\b', text, re.IGNORECASE)
+            upi_ids = re.findall(r'\b[\w\.-]+@(?:paytm|phonepe|ybl|oksbi|okhdfcbank|okicici|okaxis|axl|ibl|pnb|boi)\b', text, re.IGNORECASE)
             self.upi_ids.update(upi_ids)
             
             # Phone numbers
@@ -131,46 +123,52 @@ class IntelligenceTracker:
             self.email_addresses.update(emails)
             
             # Keywords
-            scam_keywords = ['otp', 'pin', 'cvv', 'account', 'block', 'urgent', 'verify', 'suspend', 'fraud']
+            scam_keywords = ['otp', 'pin', 'cvv', 'account', 'block', 'urgent', 'verify', 'suspend', 'fraud', 'transaction']
             for kw in scam_keywords:
                 if kw in text.lower():
                     self.keywords.add(kw)
     
     def add_question_asked(self, question_type: str):
-        """Track what we've asked to avoid repetition"""
+        """Track question types to avoid repetition"""
         with self.lock:
             self.questions_asked.append(question_type)
     
-    def has_asked(self, question_type: str) -> bool:
-        """Check if we've already asked this"""
+    def get_summary(self) -> str:
+        """Get intelligence summary for LLM"""
         with self.lock:
-            return question_type in self.questions_asked
+            return f"""Extracted So Far:
+• Phones: {len(self.phone_numbers)} {list(self.phone_numbers)[:2] if self.phone_numbers else '[]'}
+• URLs: {len(self.urls)} {list(self.urls)[:2] if self.urls else '[]'}
+• Emails: {len(self.email_addresses)} {list(self.email_addresses)[:2] if self.email_addresses else '[]'}
+• UPI: {len(self.upi_ids)} {list(self.upi_ids)[:2] if self.upi_ids else '[]'}
+• Banks: {len(self.bank_accounts)} {list(self.bank_accounts)[:2] if self.bank_accounts else '[]'}
+Questions Asked: {self.questions_asked[-5:] if self.questions_asked else 'none'}
+Message #{self.message_count}"""
     
-    def get_missing_intel(self) -> List[str]:
-        """What intelligence are we still missing?"""
+    def get_missing_intel_priorities(self) -> List[str]:
+        """What we need most urgently"""
         with self.lock:
-            missing = []
+            priorities = []
             if len(self.phone_numbers) == 0:
-                missing.append("contact_phone")
+                priorities.append("CONTACT_PHONE")
             if len(self.urls) == 0:
-                missing.append("website_url")
+                priorities.append("WEBSITE_URL")
             if len(self.email_addresses) == 0:
-                missing.append("email_address")
+                priorities.append("EMAIL_ADDRESS")
             if len(self.upi_ids) == 0 and len(self.bank_accounts) == 0:
-                missing.append("financial_info")
-            return missing
+                priorities.append("PAYMENT_INFO")
+            return priorities
     
     def get_intelligence_score(self) -> int:
-        """Calculate quality score"""
+        """Quality score"""
         with self.lock:
-            score = (
+            return (
                 len(self.phone_numbers) * 10 +
                 len(self.urls) * 8 +
                 len(self.email_addresses) * 7 +
                 len(self.upi_ids) * 10 +
                 len(self.bank_accounts) * 10
             )
-            return score
     
     def to_dict(self) -> Dict[str, Any]:
         """Export for callback"""
@@ -191,11 +189,11 @@ session_trackers = defaultdict(IntelligenceTracker)
 session_locks = defaultdict(threading.Lock)
 
 # ============================================================================
-# INTELLIGENT LLM AGENT
+# OPTIMIZED INTELLIGENT AGENT
 # ============================================================================
 
-class IntelligentHoneypotAgent:
-    """LLM-powered strategic agent that thinks before responding"""
+class OptimizedHoneypotAgent:
+    """Single-call LLM agent with strong strategic guidance"""
     
     def __init__(self, api_key: str):
         self.client = AsyncOpenAI(api_key=api_key)
@@ -203,310 +201,231 @@ class IntelligentHoneypotAgent:
     
     @retry(
         stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception_type((asyncio.TimeoutError, Exception))
+        wait=wait_exponential(multiplier=1, min=2, max=8)
     )
-    async def analyze_and_respond(
+    async def generate_response(
         self,
         session_id: str,
         current_message: str,
         conversation_history: List[Message],
         tracker: IntelligenceTracker
     ) -> Dict[str, Any]:
-        """Two-phase approach: Analyze then Respond"""
+        """Single LLM call for response generation"""
         
-        # Phase 1: Strategic Analysis
-        analysis = await self._analyze_conversation(
-            current_message,
-            conversation_history,
-            tracker
-        )
+        # Build conversation context (last 6 messages)
+        conv_text = ""
+        for msg in conversation_history[-6:]:
+            sender = "Scammer" if msg.sender != "bot" else "Me"
+            conv_text += f"{sender}: {msg.text}\n"
+        conv_text += f"Scammer: {current_message}"
         
-        # Phase 2: Generate Response
-        response = await self._generate_strategic_response(
-            current_message,
-            conversation_history,
-            tracker,
-            analysis
-        )
+        # Get intelligence summary
+        intel_summary = tracker.get_summary()
+        missing_priorities = tracker.get_missing_intel_priorities()
         
-        return response
-    
-    async def _analyze_conversation(
-        self,
-        current_message: str,
-        history: List[Message],
-        tracker: IntelligenceTracker
-    ) -> Dict[str, Any]:
-        """Phase 1: LLM analyzes the conversation strategically"""
+        # Get question examples based on what we need
+        question_examples = self._get_question_examples(missing_priorities, tracker.message_count)
         
-        # Build conversation context
-        conv_text = "\n".join([
-            f"{'Scammer' if msg.sender != 'bot' else 'Me'}: {msg.text}"
-            for msg in history[-5:]  # Last 5 messages
-        ])
-        conv_text += f"\nScammer: {current_message}"
-        
-        # What we have so far
-        intel_summary = f"""
-Intelligence Extracted So Far:
-- Phone Numbers: {len(tracker.phone_numbers)} ({', '.join(list(tracker.phone_numbers)[:3]) or 'none'})
-- URLs: {len(tracker.urls)} ({', '.join(list(tracker.urls)[:2]) or 'none'})
-- Email Addresses: {len(tracker.email_addresses)} ({', '.join(list(tracker.email_addresses)[:2]) or 'none'})
-- UPI IDs: {len(tracker.upi_ids)} ({', '.join(list(tracker.upi_ids)[:2]) or 'none'})
-- Bank Accounts: {len(tracker.bank_accounts)} ({', '.join(list(tracker.bank_accounts)[:2]) or 'none'})
-
-Questions Already Asked: {', '.join(tracker.questions_asked[-5:]) or 'none yet'}
-Message Count: {tracker.message_count}
-"""
-        
-        analysis_prompt = f"""You are analyzing a scam conversation to extract maximum intelligence efficiently.
-
-CONVERSATION SO FAR:
-{conv_text}
-
-{intel_summary}
-
-Your task: Analyze this strategically and provide a JSON response with:
-
-1. **scam_type**: What type of scam is this? (bank_fraud, upi_fraud, phishing, otp_fraud, lottery, impersonation)
-
-2. **urgency_level**: How urgent/threatening is the scammer? (1-5, where 5 is extremely urgent)
-
-3. **intelligence_gaps**: What critical information are we still missing? List the TOP 2 priorities.
-
-4. **scammer_pattern**: What is the scammer trying to get me to do? (e.g., "send OTP", "click link", "call number")
-
-5. **victim_emotion**: What emotion should the victim show now? (confused, worried, scared, compliant, skeptical)
-
-6. **next_action**: What should the victim do next to extract more intel? Choose ONE:
-   - "ask_for_verification" - Ask how to verify legitimacy (gets phone/website)
-   - "express_concern" - Show worry but ask for clarification (keeps them talking)
-   - "request_instructions" - Ask what exactly to do (gets process details)
-   - "confirm_details" - Repeat back what they said to confirm (makes them repeat contact info)
-   - "show_compliance" - Agree but fumble on details (gets them to explain more)
-
-7. **avoid_repeating**: What question types have we already asked that we should NOT ask again?
-
-Respond ONLY with valid JSON:
-{{
-  "scam_type": "...",
-  "urgency_level": 3,
-  "intelligence_gaps": ["...", "..."],
-  "scammer_pattern": "...",
-  "victim_emotion": "...",
-  "next_action": "...",
-  "avoid_repeating": ["..."]
-}}"""
-
-        try:
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": analysis_prompt}],
-                max_tokens=300,
-                temperature=0.3,  # Lower temperature for analysis
-                timeout=20.0,
-                response_format={"type": "json_object"}
-            )
-            
-            analysis = json.loads(response.choices[0].message.content)
-            return analysis
-            
-        except Exception as e:
-            logger.error(f"Analysis error: {e}")
-            # Fallback analysis
-            return {
-                "scam_type": "unknown",
-                "urgency_level": 3,
-                "intelligence_gaps": ["contact_info", "website"],
-                "scammer_pattern": "requesting sensitive info",
-                "victim_emotion": "confused",
-                "next_action": "ask_for_verification",
-                "avoid_repeating": []
-            }
-    
-    async def _generate_strategic_response(
-        self,
-        current_message: str,
-        history: List[Message],
-        tracker: IntelligenceTracker,
-        analysis: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Phase 2: Generate response based on strategic analysis"""
-        
-        # Build conversation for context
-        conv_text = "\n".join([
-            f"{'Scammer' if msg.sender != 'bot' else 'Me'}: {msg.text}"
-            for msg in history[-8:]
-        ])
-        
-        # Map next_action to specific tactics
-        action_tactics = {
-            "ask_for_verification": [
-                "Can I call you back on an official number to verify?",
-                "What's your employee ID or reference number?",
-                "Is there a website where I can check this?",
-                "How do I know this is really from [bank name]?"
-            ],
-            "express_concern": [
-                "This is really worrying me. What exactly happened?",
-                "I don't understand why this is happening. Can you explain?",
-                "Are you sure about this? This seems strange.",
-                "What should I do? I'm confused."
-            ],
-            "request_instructions": [
-                "What exactly do I need to do?",
-                "Where should I send this information?",
-                "Do I need to go anywhere or click something?",
-                "Walk me through the steps, I'm not good with this stuff."
-            ],
-            "confirm_details": [
-                "Just to confirm, you said [repeat their claim]?",
-                "So you're from [their claimed source]? What's your contact number?",
-                "Let me make sure I understand - you need me to [action]?",
-                "And your number is [number they mentioned]? Should I save it?"
-            ],
-            "show_compliance": [
-                "Okay, I'll do it. But which number should I send to again?",
-                "I'm ready to help. What's the email address?",
-                "I'm opening my phone now. Where exactly do I go?",
-                "Yes, I understand. But can you send me the link one more time?"
-            ]
-        }
-        
-        next_action = analysis.get('next_action', 'express_concern')
-        example_tactics = action_tactics.get(next_action, action_tactics['express_concern'])
-        
-        # Emotion mapping
-        emotion_traits = {
-            "confused": "sound uncertain, ask clarifying questions",
-            "worried": "express concern, seek reassurance",
-            "scared": "show panic, want to act quickly but fumble",
-            "compliant": "agree to help but need clear instructions",
-            "skeptical": "questioning but can be convinced"
-        }
-        
-        victim_emotion = analysis.get('victim_emotion', 'confused')
-        emotion_guidance = emotion_traits.get(victim_emotion, "be natural")
-        
-        response_prompt = f"""You are a REAL PERSON (not a bot) receiving a scam message. You must respond naturally to extract information.
+        # Build strategic prompt
+        prompt = f"""You are a REAL PERSON (not AI) receiving a scam message. Respond naturally to extract information.
 
 CONVERSATION:
 {conv_text}
-Scammer: {current_message}
 
-ANALYSIS:
-- Scam Type: {analysis.get('scam_type')}
-- Your Emotion: {victim_emotion} ({emotion_guidance})
-- Urgency Level: {analysis.get('urgency_level')}/5
-- What Scammer Wants: {analysis.get('scammer_pattern')}
+INTELLIGENCE STATUS:
+{intel_summary}
 
-YOUR GOAL THIS MESSAGE:
-Action: {next_action}
-Example approaches: {'; '.join(example_tactics[:2])}
+🎯 TOP PRIORITY - GET THESE:
+{chr(10).join(f'• {p}' for p in missing_priorities[:2]) if missing_priorities else '• Keep extracting more details'}
 
-INTELLIGENCE GAPS (prioritize asking about these):
-{', '.join(analysis.get('intelligence_gaps', ['contact info']))}
+STRATEGIC GUIDANCE:
+{self._get_strategic_guidance(tracker.message_count, missing_priorities)}
 
-CRITICAL RULES:
-1. Sound like a REAL CONFUSED PERSON - not an AI
-2. Keep response SHORT (1-2 sentences max, sometimes just a few words)
-3. Use informal language: "ok", "yeah", "wait", "uh", "huh?"
-4. Make typos occasionally if panicked
-5. DON'T repeat questions you've asked before
-6. Extract info naturally - don't be obvious
-7. NEVER say "I cannot assist" or sound like customer service
+EXAMPLE QUESTIONS YOU SHOULD ASK:
+{question_examples}
 
-Things to AVOID repeating: {', '.join(analysis.get('avoid_repeating', []))}
+⚠️ CRITICAL RULES:
+1. Ask ONE clear question that gets missing intelligence
+2. DON'T ask "what do you mean?" or "can you explain?" - that wastes messages
+3. DON'T repeat questions from this list: {', '.join(tracker.questions_asked[-5:])}
+4. BE DIRECT: "what's your phone number?", "where's the website?", "what's the email?"
+5. Sound human: use "ok", "wait", "uh", lowercase, typos
+6. Keep it SHORT: 1-2 sentences max
+7. If they gave contact info, CONFIRM it: "so your number is [number]?"
 
 Respond with JSON:
 {{
-  "reply": "your natural human response",
-  "question_type_used": "brief label of what you asked about"
+  "reply": "your natural response (1-2 sentences)",
+  "question_type": "brief label of what you asked"
 }}
 
-Example good responses:
-- "wait who is this??"
-- "ok but can u give me ur number so i can call back"
-- "im scared what do i do"
-- "which website should i go to?"
-- "so ur saying i need to send otp to where exactly?"
+Example GOOD responses:
+- "ok whats ur official number i can call back?"
+- "wait where should i go to fix this? any website?"
+- "so ur email is [email]? should i send there?"
+- "which account number do u need from me?"
+
+Example BAD responses (DON'T do these):
+- "uh what do you mean by that?" ❌
+- "can you explain more?" ❌
+- "this is confusing" ❌
 """
 
         try:
             response = await self.client.chat.completions.create(
                 model=self.model,
-                messages=[{"role": "user", "content": response_prompt}],
-                max_tokens=150,
-                temperature=0.8,  # Higher for natural variation
-                timeout=20.0,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=120,
+                temperature=0.75,
+                timeout=15.0,
                 response_format={"type": "json_object"}
             )
             
             result = json.loads(response.choices[0].message.content)
-            
-            # Add human imperfections
             reply = result.get('reply', 'what?')
-            reply = self._add_human_touches(reply, analysis.get('urgency_level', 3))
             
-            # Track what we asked
-            if result.get('question_type_used'):
-                tracker.add_question_asked(result['question_type_used'])
+            # Add human touches
+            reply = self._add_human_touches(reply)
+            
+            # Track question
+            if result.get('question_type'):
+                tracker.add_question_asked(result['question_type'])
             
             return {
                 'reply': reply,
-                'analysis': analysis,
                 'confidence': 0.8
             }
             
         except Exception as e:
-            logger.error(f"Response generation error: {e}")
-            # Fallback
-            fallbacks = [
-                "wait what?",
-                "who is this?",
-                "im confused",
-                "what do u mean?",
-                "can u explain?"
-            ]
+            logger.error(f"LLM error: {e}")
+            # Intelligent fallback based on what we need
             return {
-                'reply': random.choice(fallbacks),
-                'analysis': analysis,
+                'reply': self._get_smart_fallback(missing_priorities, tracker.message_count),
                 'confidence': 0.3
             }
     
-    def _add_human_touches(self, text: str, urgency: int) -> str:
-        """Add realistic human imperfections"""
+    def _get_strategic_guidance(self, message_count: int, missing: List[str]) -> str:
+        """Get strategic guidance based on message count and gaps"""
+        
+        if message_count <= 2:
+            return "First messages: Ask who they are and for verification (phone/website)"
+        
+        elif message_count <= 5:
+            if "CONTACT_PHONE" in missing:
+                return "Priority: Get their phone number. Ask: 'what's your number so i can call back?'"
+            elif "WEBSITE_URL" in missing:
+                return "Priority: Get website/portal. Ask: 'where should i go to check this?'"
+            else:
+                return "Priority: Get email address. Ask: 'what's your email?'"
+        
+        elif message_count <= 10:
+            if "EMAIL_ADDRESS" in missing:
+                return "Priority: Get email. Ask: 'should i email someone about this?'"
+            elif "PAYMENT_INFO" in missing:
+                return "Priority: Get payment details. Ask: 'which upi id should i use?'"
+            else:
+                return "Confirm details: Repeat back their contact info to make them confirm"
+        
+        else:
+            return "Final push: Confirm ALL contact details one more time before complying"
+    
+    def _get_question_examples(self, missing: List[str], message_count: int) -> str:
+        """Get specific question examples based on what we need"""
+        
+        examples = []
+        
+        if "CONTACT_PHONE" in missing:
+            examples.extend([
+                '"whats ur number so i can call u back?"',
+                '"can u give me ur official helpline number?"',
+                '"wait which number r u calling from?"'
+            ])
+        
+        if "WEBSITE_URL" in missing:
+            examples.extend([
+                '"is there a website i should go to?"',
+                '"where do i check this? any portal?"',
+                '"what link should i click?"'
+            ])
+        
+        if "EMAIL_ADDRESS" in missing:
+            examples.extend([
+                '"whats ur email address?"',
+                '"should i email someone? what email?"',
+                '"where should i send documents?"'
+            ])
+        
+        if "PAYMENT_INFO" in missing:
+            examples.extend([
+                '"which upi id should i send to?"',
+                '"whats ur payment details?"',
+                '"where do i transfer money?"'
+            ])
+        
+        if not examples:
+            examples = [
+                '"just to confirm, ur number is [number]?"',
+                '"and the website is [url]?"',
+                '"should i do this right now or later?"'
+            ]
+        
+        # Return 2-3 examples
+        return "\n".join(examples[:3])
+    
+    def _add_human_touches(self, text: str) -> str:
+        """Add realistic imperfections"""
         if not text:
             return text
         
-        # More imperfections with higher urgency
-        imperfection_chance = min(0.4, urgency * 0.08)
-        
         # Lowercase sometimes
-        if random.random() < imperfection_chance and text[0].isupper():
+        if random.random() < 0.25 and text[0].isupper():
             text = text[0].lower() + text[1:]
         
-        # Remove punctuation sometimes
-        if random.random() < imperfection_chance:
-            text = text.rstrip('.,!?')
-        
-        # Add extra punctuation if urgent
-        if urgency >= 4 and '?' in text and random.random() < 0.3:
-            text = text.replace('?', '??')
-        
-        # Typos
-        if random.random() < imperfection_chance * 0.5:
-            typos = {
-                'please': 'pls', 'okay': 'ok', 'you': 'u',
-                'your': 'ur', 'what': 'wht', 'are': 'r'
-            }
+        # Simple typos
+        if random.random() < 0.2:
+            typos = {'please': 'pls', 'you': 'u', 'your': 'ur', 'okay': 'ok', 'are': 'r'}
             for formal, informal in typos.items():
                 if formal in text.lower() and random.random() < 0.5:
                     text = re.sub(f'\\b{formal}\\b', informal, text, flags=re.IGNORECASE, count=1)
                     break
         
+        # Remove punctuation sometimes
+        if random.random() < 0.15:
+            text = text.rstrip('.,!?')
+        
         return text
+    
+    def _get_smart_fallback(self, missing: List[str], message_count: int) -> str:
+        """Intelligent fallback based on what we need"""
+        
+        if "CONTACT_PHONE" in missing:
+            return random.choice([
+                "whats ur number?",
+                "can i call u back? whats ur number",
+                "give me ur contact number"
+            ])
+        
+        if "WEBSITE_URL" in missing:
+            return random.choice([
+                "where should i go for this?",
+                "is there a website?",
+                "what link do i click"
+            ])
+        
+        if "EMAIL_ADDRESS" in missing:
+            return random.choice([
+                "whats ur email?",
+                "should i email someone?",
+                "where do i send info"
+            ])
+        
+        # Default
+        return random.choice([
+            "ok what do i do",
+            "wait what",
+            "huh?",
+            "can u repeat that"
+        ])
 
 # ============================================================================
 # SESSION MANAGEMENT
@@ -515,36 +434,36 @@ Example good responses:
 active_agents = {}
 
 def should_terminate_session(tracker: IntelligenceTracker) -> bool:
-    """Intelligent termination decision"""
+    """Intelligent termination"""
     
-    # Don't terminate too early
     if tracker.message_count < MIN_MESSAGES_FOR_TERMINATION:
         return False
     
-    # Maximum messages reached
     if tracker.message_count >= MAX_MESSAGES_PER_SESSION:
         return True
     
-    # High-quality intelligence gathered
     intel_score = tracker.get_intelligence_score()
-    has_multiple_types = (
-        (len(tracker.phone_numbers) > 0) +
-        (len(tracker.urls) > 0) +
-        (len(tracker.email_addresses) > 0) +
-        (len(tracker.upi_ids) > 0 or len(tracker.bank_accounts) > 0)
-    )
+    has_multiple = sum([
+        len(tracker.phone_numbers) > 0,
+        len(tracker.urls) > 0,
+        len(tracker.email_addresses) > 0,
+        len(tracker.upi_ids) > 0 or len(tracker.bank_accounts) > 0
+    ])
     
     # Good stopping points
     if intel_score >= 30 and tracker.message_count >= 8:
         return True
     
-    if has_multiple_types >= 3 and tracker.message_count >= 10:
+    if has_multiple >= 3 and tracker.message_count >= 10:
+        return True
+    
+    if intel_score >= 50:
         return True
     
     return False
 
 async def send_final_callback(session_id: str, tracker: IntelligenceTracker) -> bool:
-    """Send intelligence to GUVI"""
+    """Send to GUVI"""
     try:
         intel_dict = tracker.to_dict()
         
@@ -559,10 +478,10 @@ async def send_final_callback(session_id: str, tracker: IntelligenceTracker) -> 
                 "phoneNumbers": intel_dict['phoneNumbers'],
                 "suspiciousKeywords": intel_dict['suspiciousKeywords']
             },
-            "agentNotes": f"Intelligent extraction completed. Intelligence score: {intel_dict['intelligenceScore']}"
+            "agentNotes": f"Intelligent extraction: Score {intel_dict['intelligenceScore']}, {intel_dict['messageCount']} messages"
         }
         
-        logger.info(f"📤 Callback: Session {session_id[:8]}... | Score: {intel_dict['intelligenceScore']} | Items: {len(intel_dict['phoneNumbers']) + len(intel_dict['upiIds']) + len(intel_dict['phishingLinks']) + len(intel_dict['bankAccounts'])}")
+        logger.info(f"📤 Callback: {session_id[:8]}... | Score: {intel_dict['intelligenceScore']}")
         
         async with aiohttp.ClientSession() as session:
             async with session.post(
@@ -571,7 +490,7 @@ async def send_final_callback(session_id: str, tracker: IntelligenceTracker) -> 
                 timeout=aiohttp.ClientTimeout(total=10)
             ) as response:
                 success = response.status == 200
-                logger.info(f"{'✅' if success else '❌'} Callback HTTP {response.status}")
+                logger.info(f"{'✅' if success else '❌'} Callback: {response.status}")
                 return success
                 
     except Exception as e:
@@ -583,9 +502,8 @@ async def send_final_callback(session_id: str, tracker: IntelligenceTracker) -> 
 # ============================================================================
 
 app = FastAPI(
-    title="Intelligent Honeypot API v5.0",
-    description="LLM-powered strategic scam intelligence extraction",
-    version="5.0.0"
+    title="Honeypot API v5.1 Optimized",
+    version="5.1.0"
 )
 
 limiter = Limiter(key_func=get_remote_address)
@@ -607,7 +525,7 @@ async def honeypot_endpoint(
     honeypot_request: HoneypotRequest,
     x_api_key: str = Header(..., alias="x-api-key")
 ):
-    """Main endpoint - intelligent honeypot"""
+    """Main endpoint"""
     
     if x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API key")
@@ -627,11 +545,7 @@ async def honeypot_endpoint(
             ).strip()
         
         if not current_message:
-            return HoneypotResponse(
-                status="error",
-                reply="huh?",
-                sessionId=session_id
-            )
+            return HoneypotResponse(status="error", reply="?", sessionId=session_id)
         
         # Parse history
         conversation_history = []
@@ -649,31 +563,31 @@ async def honeypot_endpoint(
         tracker = session_trackers[session_id]
         tracker.message_count += 1
         
-        # Extract intelligence from current message
+        # Extract intelligence
         tracker.extract_from_text(current_message)
         
-        logger.info(f"📨 Session {session_id[:8]}... Msg#{tracker.message_count}: {current_message[:60]}...")
+        logger.info(f"📨 {session_id[:8]}... Msg#{tracker.message_count}: {current_message[:50]}...")
         
-        # Check if this looks like a scam
+        # Check if scam
         scam_indicators = len(tracker.keywords)
         is_scam = scam_indicators >= 2 or tracker.message_count > 1
         
         if not is_scam:
             return HoneypotResponse(
                 status="success",
-                reply=random.choice(["who is this?", "wrong number", "?"]),
+                reply=random.choice(["who is this", "wrong number", "?"]),
                 sessionId=session_id
             )
         
         # Initialize agent
         if session_id not in active_agents:
-            active_agents[session_id] = IntelligentHoneypotAgent(OPENAI_API_KEY)
-            logger.info(f"🎯 New scam detected: {session_id[:8]}...")
+            active_agents[session_id] = OptimizedHoneypotAgent(OPENAI_API_KEY)
+            logger.info(f"🎯 New scam: {session_id[:8]}...")
         
         agent = active_agents[session_id]
         
-        # Generate intelligent response
-        result = await agent.analyze_and_respond(
+        # Generate response (single LLM call)
+        result = await agent.generate_response(
             session_id,
             current_message,
             conversation_history,
@@ -682,12 +596,12 @@ async def honeypot_endpoint(
         
         reply = result['reply']
         
-        logger.info(f"💬 Response: {reply}")
-        logger.info(f"📊 Intel Score: {tracker.get_intelligence_score()} | Missing: {', '.join(tracker.get_missing_intel())}")
+        logger.info(f"💬 Reply: {reply}")
+        logger.info(f"📊 Score: {tracker.get_intelligence_score()} | Need: {', '.join(tracker.get_missing_intel_priorities()[:2])}")
         
         # Check termination
         if should_terminate_session(tracker):
-            logger.info(f"🏁 Session {session_id[:8]}... complete after {tracker.message_count} messages")
+            logger.info(f"🏁 Done: {session_id[:8]}... ({tracker.message_count} msgs)")
             asyncio.create_task(send_final_callback(session_id, tracker))
         
         return HoneypotResponse(
@@ -703,41 +617,27 @@ async def honeypot_endpoint(
     except Exception as e:
         logger.error(f"❌ Error: {e}")
         logger.error(traceback.format_exc())
-        return HoneypotResponse(
-            status="error",
-            reply="what?",
-            sessionId=honeypot_request.sessionId or "unknown"
-        )
+        return HoneypotResponse(status="error", reply="what", sessionId=honeypot_request.sessionId or "unknown")
 
 @app.get("/health")
 async def health_check():
-    return {
-        "status": "healthy",
-        "version": "5.0.0",
-        "mode": "INTELLIGENT",
-        "active_sessions": len(active_agents)
-    }
+    return {"status": "healthy", "version": "5.1.0", "active_sessions": len(active_agents)}
 
 @app.get("/")
 async def root():
     return {
-        "service": "Intelligent Honeypot API v5.0",
-        "features": [
-            "LLM strategic analysis",
-            "Zero redundancy",
-            "Context-aware responses",
-            "Efficient intelligence extraction"
-        ]
+        "service": "Optimized Honeypot v5.1",
+        "features": ["Single LLM call", "Strategic questions", "Fast response", "No redundancy"]
     }
 
 if __name__ == "__main__":
-    print("=" * 80)
-    print("🧠 INTELLIGENT HONEYPOT API v5.0")
-    print("=" * 80)
-    print("✅ LLM Brain: Analyzes before responding")
-    print("✅ Strategic: Extracts intel efficiently")
-    print("✅ Zero Redundancy: Tracks what's been asked")
-    print("✅ Natural: Sounds completely human")
-    print("=" * 80)
+    print("=" * 70)
+    print("🧠 OPTIMIZED HONEYPOT v5.1")
+    print("=" * 70)
+    print("✅ Single LLM call per message (faster)")
+    print("✅ Strategic question guidance")
+    print("✅ No repetitive clarifying questions")
+    print("✅ Direct intelligence extraction")
+    print("=" * 70)
     
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
