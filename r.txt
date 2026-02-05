@@ -2,5 +2,10 @@ fastapi
 uvicorn
 openai
 pydantic
+tiktoken
+aiohttp
+tenacity
+slowapi
+python-dotenv
 requests
 python-multipart
